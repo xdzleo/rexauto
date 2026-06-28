@@ -281,10 +281,23 @@ def do_codegen(ctx, env=None, level="error"):
 
 
 def do_build(ctx, bat):
+    """Stream the build so ninja's [N/M] progress reaches the UI live."""
     logp = os.path.join(ctx.work, "_build.log")
+    p = subprocess.Popen(["cmd", "/c", bat], stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, bufsize=1)
+    last = 0.0
     with open(logp, "w") as lf:
-        cp = subprocess.run(["cmd", "/c", bat], stdout=lf, stderr=subprocess.STDOUT)
-    return logp, cp.returncode
+        for line in p.stdout:
+            lf.write(line)
+            m = re.search(r"\[(\d+)/(\d+)\]", line)
+            if m:
+                n, tot = int(m.group(1)), int(m.group(2))
+                now = time.time()
+                if now - last > 0.3 or n == tot:
+                    last = now
+                    name = line.strip().rsplit("/", 1)[-1].rsplit("\\", 1)[-1][:42]
+                    ctx.log("@build %d/%d %s" % (n, tot, name))
+    return logp, p.wait()
 
 
 def stage_build(ctx):

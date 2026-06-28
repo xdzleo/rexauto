@@ -532,6 +532,13 @@ function connect(){
     if(m.type==='meta'){applyMeta(m);}
     else if(m.type==='stage'){ if(m.status!=='pending'||!running)setStage(m.stage,m.status);}
     else if(m.type==='status'){setHeadline(m.text);}
+    else if(m.type==='buildprogress'){
+      const done=document.querySelectorAll('.stage.done').length;
+      const frac=m.total?m.done/m.total:0;
+      const pct=Math.min(99,Math.round((done+frac)/STAGES.length*100));
+      document.getElementById('pct').textContent=pct+'%';
+      document.getElementById('barfill').style.width=pct+'%';
+    }
     else if(m.type==='log'){addLog(m.level,m.text);}
     else if(m.type==='deps'){renderDeps(m.items);}
     else if(m.type==='setup'){onSetupEvent(m);}

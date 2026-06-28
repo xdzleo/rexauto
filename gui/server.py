@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -160,6 +161,14 @@ class Hub:
                 st = body.split()[1]
                 if st in STAGES:
                     self.emit({"type": "stage", "stage": st, "status": "done"})
+                return
+            if body.startswith("@"):                 # live progress, headline only
+                prog = body[1:]
+                self.emit({"type": "status", "text": prog})
+                m = re.match(r"build (\d+)/(\d+)", prog)
+                if m:
+                    self.emit({"type": "buildprogress",
+                               "done": int(m.group(1)), "total": int(m.group(2))})
                 return
             # headline-worthy status lines
             self.emit({"type": "status", "text": body})
