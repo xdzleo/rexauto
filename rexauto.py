@@ -433,6 +433,18 @@ def do_build(ctx, bat):
     return logp, p.wait()
 
 
+def write_game_root(ctx):
+    """Drop a 'game_root.txt' sidecar next to the exe naming the game data dir, so
+    double-clicking the exe (no --game_data_root) still launches the title -- the
+    runtime reads this when the flag is absent."""
+    try:
+        if ctx.game and os.path.isdir(ctx.game):
+            with open(os.path.join(ctx.builddir, "game_root.txt"), "w", encoding="utf-8") as f:
+                f.write(os.path.abspath(ctx.game) + "\n")
+    except OSError as ex:
+        ctx.log("could not write game_root.txt sidecar (%s)" % ex)
+
+
 def stage_build(ctx):
     miss = [k for k in ("vcvars", "clang", "clangxx", "sdk") if not ctx.env[k]]
     if miss:
@@ -445,6 +457,7 @@ def stage_build(ctx):
         logp, rc = do_build(ctx, bat)
         txt = _heal._read_text(logp)
         if rc == 0 and os.path.exists(ctx.exe):
+            write_game_root(ctx)
             ctx.log("build OK -> %s" % ctx.exe)
             return ctx.mark("build", {"exe": ctx.exe})
         if "use of undeclared label" in txt:
