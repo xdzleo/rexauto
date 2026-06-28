@@ -1,0 +1,134 @@
+diff --git a/include/rex/codegen/function_graph.h b/include/rex/codegen/function_graph.h
+index 171eb67..45a8cd7 100644
+--- a/include/rex/codegen/function_graph.h
++++ b/include/rex/codegen/function_graph.h
+@@ -195,6 +195,15 @@ class FunctionGraph {
+   std::vector<std::pair<uint32_t, uint32_t>> chunks_;    // base, size pairs
+   MemoryReader memoryReader_;
+ 
++  // Index: exact jump target -> nodes that have an unresolved jump to it.
++  // notifyFunctionAdded() resolves a jump only when its target == the new
++  // function's base (see FunctionNode::tryResolveAgainst), so this lets it touch
++  // just the nodes that can actually resolve, instead of scanning every function
++  // on every add (the O(F^2) cost that dominated the Discover phase). Entries may
++  // go stale once a jump resolves; tryResolveAgainst re-checks unresolvedJumps_,
++  // so stale entries are harmless no-ops (no removal needed for correctness).
++  std::unordered_map<uint32_t, std::vector<FunctionNode*>> unresolvedByTarget_;
++
+   // Notify all PENDING functions that a new function was added
+   void notifyFunctionAdded(FunctionNode* newFunction);
+ };
+diff --git a/src/codegen/codegen_writer.cpp b/src/codegen/codegen_writer.cpp
+index 69e4793..e784a60 100644
+--- a/src/codegen/codegen_writer.cpp
++++ b/src/codegen/codegen_writer.cpp
+@@ -13,9 +13,12 @@
+ #include "codegen_flags.h"
+ 
+ #include <algorithm>
++#include <atomic>
+ #include <filesystem>
+ #include <string>
++#include <thread>
+ #include <unordered_map>
++#include <vector>
+ 
+ #include <fmt/format.h>
+ #include <inja/inja.hpp>
+@@ -226,23 +229,56 @@ bool CodegenWriter::write(bool force) {
+   if (runtime_)
+     emitCtx.resolver = runtime_->export_resolver();
+ 
+-  // Generate recomp files with size-based splitting
++  // Generate recomp files with size-based splitting.
++  //
++  // emitCpp() is a pure, const, read-only transform (it builds a local string
++  // from the binary image, the function graph and the export tables; the only
++  // shared lookup, GetExportByOrdinal, is read-only). So emit every function's
++  // C++ in parallel across all cores, then assemble the units serially in
++  // address order. The output is byte-identical to the sequential version, but
++  // the (previously single-threaded) codegen now saturates the CPU -- this is
++  // the per-iteration hot path of the run-heal rebuild loop.
+   REXCODEGEN_TRACE("Recompiling {} functions...", functions.size());
++
++  std::vector<std::string> codes(functions.size());
++  {
++    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
++    const unsigned nthreads = static_cast<unsigned>(std::min<size_t>(hw, functions.size()));
++    std::atomic<size_t> next{0};
++    auto worker = [&]() {
++      for (size_t i = next.fetch_add(1, std::memory_order_relaxed); i < functions.size();
++           i = next.fetch_add(1, std::memory_order_relaxed)) {
++        codes[i] = functions[i]->emitCpp(emitCtx);
++      }
++    };
++    if (nthreads <= 1) {
++      worker();
++    } else {
++      std::vector<std::thread> pool;
++      pool.reserve(nthreads);
++      for (unsigned t = 0; t < nthreads; ++t)
++        pool.emplace_back(worker);
++      for (auto& th : pool)
++        th.join();
++    }
++  }
++
++  const size_t maxFileSize = REXCVAR_GET(max_file_size_bytes);
+   size_t currentFileBytes = 0;
+   println("#include \"{}_init.h\"\n", projectName);
+ 
+   for (size_t i = 0; i < functions.size(); i++) {
+-    std::string code = functions[i]->emitCpp(emitCtx);
++    std::string& code = codes[i];
+ 
+-    if (currentFileBytes > 0 && currentFileBytes + code.size() > REXCVAR_GET(max_file_size_bytes)) {
++    if (currentFileBytes > 0 && currentFileBytes + code.size() > maxFileSize) {
+       SaveCurrentOutData();
+       println("#include \"{}_init.h\"\n", projectName);
+       currentFileBytes = 0;
+     }
+ 
+-    if (code.size() > REXCVAR_GET(max_file_size_bytes)) {
++    if (code.size() > maxFileSize) {
+       REXCODEGEN_WARN("Function 0x{:08X} is {} bytes, exceeds max_file_size_bytes ({})",
+-                      functions[i]->base(), code.size(), REXCVAR_GET(max_file_size_bytes));
++                      functions[i]->base(), code.size(), maxFileSize);
+     }
+ 
+     out += code;
+diff --git a/src/codegen/function_graph.cpp b/src/codegen/function_graph.cpp
+index 0c0d1be..451cb88 100644
+--- a/src/codegen/function_graph.cpp
++++ b/src/codegen/function_graph.cpp
+@@ -961,6 +961,9 @@ void FunctionGraph::addUnresolvedJumpToFunction(uint32_t entry, uint32_t site, u
+ 
+   // Not resolvable yet - add as unresolved
+   node->addUnresolvedJump(site, target, isCall, conditional);
++  // Index by target so notifyFunctionAdded only touches nodes that can resolve
++  // against a future function at this exact address (avoids the O(F^2) full scan).
++  unresolvedByTarget_[target].push_back(node);
+   REXCODEGEN_TRACE("FunctionGraph: added unresolved {} 0x{:08X}->0x{:08X} to function 0x{:08X}",
+                    isCall ? "call" : "jump", site, target, entry);
+ }
+@@ -1206,8 +1209,18 @@ TargetKind FunctionGraph::classifyTarget(uint32_t target, uint32_t callerAddr,
+ }
+ 
+ void FunctionGraph::notifyFunctionAdded(FunctionNode* newFunction) {
+-  for (auto& [base, node] : functions_) {
+-    if (node.get() != newFunction && node->isPending()) {
++  // A pending node resolves against newFunction only when one of its unresolved
++  // jumps targets exactly newFunction->base() (FunctionNode::tryResolveAgainst).
++  // Consult the by-target index and touch only those nodes, instead of scanning
++  // every function on every add (previously O(F^2) across the Discover phase).
++  // Result is identical: each node resolves only its own jumps, independently of
++  // the order nodes are visited, and tryResolveAgainst re-checks so stale/duplicate
++  // index entries are harmless no-ops.
++  auto it = unresolvedByTarget_.find(newFunction->base());
++  if (it == unresolvedByTarget_.end())
++    return;
++  for (FunctionNode* node : it->second) {
++    if (node != newFunction && node->isPending()) {
+       node->tryResolveAgainst(newFunction);
+     }
+   }

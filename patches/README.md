@@ -23,7 +23,33 @@ the title (`default.xex`):
 
 Command-line `--game_data_root` still wins when given.
 
+## `sdk-codegen-speedups.patch`
+
+Makes `rexglue codegen` much faster (≈2x; rayman3hd 23.5s → 12s) — the run-heal
+loop re-runs codegen on every rebuild, so this compounds. **Output is byte-identical**
+(verified by hashing the whole generated tree before/after on rayman3hd, and by
+determinism across repeated runs on skate3).
+
+Two changes:
+
+1. **Kill an O(F²) in the Discover phase.** `FunctionGraph::notifyFunctionAdded`
+   scanned *every* function on *every* function add. It now consults a
+   `target → nodes-with-an-unresolved-jump-to-it` index and touches only the nodes
+   that can actually resolve (`FunctionNode::tryResolveAgainst` matches
+   `target == newFunction->base()` exactly). Same resolutions, no full scan. This
+   was the dominant cost (Discover 19s → 10s).
+2. **Parallelize the Write phase.** Per-function `emitCpp()` is a pure, const,
+   read-only transform, so emit all functions across all cores (thread pool over a
+   pre-sized results vector), then assemble units serially in address order.
+
+Note: parallelizing the *Discover analysis* was attempted and reverted — it is
+dominated by the (now-fixed) serial graph update, and emitting all functions before
+committing loses the intra-phase graph visibility the sequential code relies on,
+changing output. The algorithmic fix above is the real, safe win.
+
 ```sh
 cd <rexglue-sdk>
 git apply /path/to/sdk-game-data-root-fallback.patch
+git apply /path/to/sdk-codegen-speedups.patch
+cmake --build out/build/win-amd64 --config Release --target install
 ```
