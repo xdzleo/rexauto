@@ -260,30 +260,47 @@ def write_build_bat(ctx):
 
 
 def _gen_snapshot(ctx):
-    """md5 + mtime of the generated units, to detect what a re-codegen changed."""
+    """Per generated file: md5 + mtime, plus the line set of headers (every TU
+    depends on the shared init header, so we need to reason about its diff)."""
     snap = {}
     for p in glob.glob(os.path.join(ctx.gen, "*.cpp")) + glob.glob(os.path.join(ctx.gen, "*.h")):
         try:
-            snap[p] = (hashlib.md5(open(p, "rb").read()).digest(), os.path.getmtime(p))
+            data = open(p, "rb").read()
+            lines = set(data.decode("utf-8", "ignore").splitlines()) if p.endswith(".h") else None
+            snap[p] = (hashlib.md5(data).digest(), os.path.getmtime(p), lines)
         except OSError:
             pass
     return snap
 
 
 def _gen_restore_unchanged(ctx, snap):
-    """Restore the mtime of regenerated files whose content didn't actually
-    change, so ninja skips recompiling them. Lossless: ninja still rebuilds on
-    real content changes (and on header changes, via its depfiles)."""
-    kept = 0
-    for p, (h, mt) in snap.items():
+    """Restore the mtime of regenerated files that didn't really change, so ninja
+    skips recompiling them. The shared init header gains a DECLARE_REX_FUNC line
+    on every heal registration — but a new extern declaration cannot change any
+    already-compiled TU, so if the header's *only* diff is added DECLARE_REX_FUNC
+    lines (nothing removed, no macro/table line touched) it is safe to keep its
+    old timestamp. Any other change (a REX_IMAGE_* macro, a removal) falls through
+    to a full recompile. Lossless either way."""
+    units = headers = 0
+    for p, (h, mt, oldlines) in snap.items():
         try:
-            if os.path.exists(p) and hashlib.md5(open(p, "rb").read()).digest() == h:
+            if not os.path.exists(p):
+                continue
+            data = open(p, "rb").read()
+            if hashlib.md5(data).digest() == h:
                 os.utime(p, (mt, mt))
-                kept += 1
+                units += 1
+            elif oldlines is not None:
+                new = set(data.decode("utf-8", "ignore").splitlines())
+                added, removed = new - oldlines, oldlines - new
+                if added and not removed and all("DECLARE_REX_FUNC" in l for l in added):
+                    os.utime(p, (mt, mt))
+                    headers += 1
         except OSError:
             pass
-    if kept:
-        ctx.log("  reusing %d unchanged unit(s) — incremental rebuild" % kept)
+    if units or headers:
+        ctx.log("  incremental rebuild: reused %d unit(s)%s"
+                % (units, " + %d header(s)" % headers if headers else ""))
 
 
 def do_codegen(ctx, env=None, level="error"):
