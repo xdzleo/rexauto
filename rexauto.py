@@ -445,10 +445,80 @@ def write_game_root(ctx):
         ctx.log("could not write game_root.txt sidecar (%s)" % ex)
 
 
+def _game_icon_png(ctx):
+    """Best-effort PNG bytes to use as the exe icon: the package cover (STFS),
+    else the title Thumbnail.png from the extracted game. None if neither."""
+    try:
+        meta = _extract.read_package_meta(getattr(ctx.args, "container", "") or "")
+        if meta.get("cover"):
+            return meta["cover"]
+    except Exception:
+        pass
+    if ctx.game:
+        thumb = os.path.join(ctx.game, "Thumbnail.png")
+        if os.path.exists(thumb):
+            try:
+                return open(thumb, "rb").read()
+            except OSError:
+                pass
+    return None
+
+
+def _inject_icon_into_cmake(ctx):
+    """Wire src/<name>.rc into the port build (before add_executable), idempotently."""
+    cml = os.path.join(ctx.port, "CMakeLists.txt")
+    if not os.path.exists(cml):
+        return
+    txt = open(cml, encoding="utf-8", errors="ignore").read()
+    if "rexauto-game-icon" in txt:
+        return
+    m = re.search(r"add_executable\(\s*%s\s+WIN32\s+\$\{(\w+)\}\s*\)" % re.escape(ctx.name), txt)
+    if not m:
+        return
+    srcvar = m.group(1)
+    block = ('    # rexauto-game-icon: use the game icon for the exe if present\n'
+             '    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/%s.rc")\n'
+             '        enable_language(RC)\n'
+             '        list(APPEND %s src/%s.rc)\n'
+             '    endif()\n' % (ctx.name, srcvar, ctx.name))
+    open(cml, "w", encoding="utf-8").write(txt[:m.start()] + block + txt[m.start():])
+
+
+def write_game_icon(ctx):
+    """Give the recompiled exe the game's icon: build src/<name>.ico from the
+    package cover or the title Thumbnail.png, emit a .rc, and wire it into the
+    port build. No-op (keeps the default icon) when no game image is available."""
+    png = _game_icon_png(ctx)
+    if not png:
+        return
+    try:
+        import io
+        from PIL import Image
+    except Exception:
+        return
+    try:
+        im = Image.open(io.BytesIO(png)).convert("RGBA")
+        w, h = im.size
+        s = max(w, h, 16)
+        canvas = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+        canvas.paste(im, ((s - w) // 2, (s - h) // 2))
+        srcdir = os.path.join(ctx.port, "src")
+        os.makedirs(srcdir, exist_ok=True)
+        sizes = [(n, n) for n in (16, 32, 48, 64, 128, 256) if n <= s] or [(s, s)]
+        canvas.save(os.path.join(srcdir, ctx.name + ".ico"), sizes=sizes)
+        with open(os.path.join(srcdir, ctx.name + ".rc"), "w", encoding="utf-8") as f:
+            f.write('1 ICON "%s.ico"\n' % ctx.name)
+        _inject_icon_into_cmake(ctx)
+        ctx.log("game icon embedded in the exe")
+    except Exception as ex:
+        ctx.log("could not generate game icon (%s)" % ex)
+
+
 def stage_build(ctx):
     miss = [k for k in ("vcvars", "clang", "clangxx", "sdk") if not ctx.env[k]]
     if miss:
         raise SystemExit("missing build tools: %s (set via env vars or install)" % ", ".join(miss))
+    write_game_icon(ctx)
     bat = write_build_bat(ctx)
     last_ends = None
     for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
