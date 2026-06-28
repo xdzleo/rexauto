@@ -36,17 +36,24 @@ self-heal loops a fresh title needs — then launches it.
    **STFS** (`CON`/`LIVE`/`PIRS`, XBLA/DLC), **ISO** (GDFX/XDVDFS disc image),
    **GoD** (SVOD, single-file), or an **already-extracted folder** (used in place).
 2. **init** — `rexglue init` scaffolds the project.
-3. **jumptables** — if IDA is present, dumps the decompressed image and recovers
+3. **setjmp** — scans the decompressed image for the statically-linked CRT
+   `setjmp`/`longjmp` and records their addresses in the manifest so codegen emits
+   `ppc_setjmp`/`ppc_longjmp`. A guest `longjmp` is a *non-local* jump (it restores
+   GPR/FPR/VMX + the stack pointer from a `jmp_buf` then `blr`); recompiled naively
+   the `blr` becomes a plain `return`, so it falls back into its caller, skips the
+   epilogue, leaves a non-volatile register corrupted and crashes C++-exception
+   titles at startup. Titles without exceptions have no signature and are untouched.
+4. **jumptables** — if IDA is present, dumps the decompressed image and recovers
    `bctr` jump tables into `switch_tables.toml`
    ([xenon-jumptables](https://github.com/xdzleo/xenon-jumptables)). Skipped
    cleanly otherwise; the recompiler's built-in switch handling still applies.
-4. **build** — codegen + clang/CMake. When the recompiler splits a function
+5. **build** — codegen + clang/CMake. When the recompiler splits a function
    mid-flow (a branch into the next one → a `goto` to an `undeclared label`), it
    **auto-extends** the function and rebuilds — the boundary fix teams otherwise
    write by hand. Repeats until clean.
-5. **runheal** — runs the game; each `invalid or unregistered function at 0xADDR`
+6. **runheal** — runs the game; each `invalid or unregistered function at 0xADDR`
    the dispatcher hits gets **registered**, rebuilt, and re-run, until it stops.
-6. **run** — launches it.
+7. **run** — launches it.
 
 ## CLI
 
@@ -78,6 +85,7 @@ python gui/make_icon.py
 pyinstaller --noconfirm --onefile --windowed --name rexauto \
   --icon gui/rexauto.ico --add-data "gui/index.html;gui" --paths gui \
   --hidden-import extract --hidden-import heal --hidden-import rexauto \
+  --hidden-import detect_setjmp \
   --hidden-import server --hidden-import setup --collect-all webview  app.py
 ```
 

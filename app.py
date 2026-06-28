@@ -57,7 +57,7 @@ def run_gui():
 def main():
     _setup_paths()
     # make sure these are pulled into a frozen build
-    import extract, heal, rexauto  # noqa
+    import extract, heal, rexauto, detect_setjmp  # noqa
     if "--__pipeline" in sys.argv:
         run_pipeline()
     else:
