@@ -26,6 +26,9 @@ UNDECL = re.compile(
     r"([^\s:]+\.cpp):(\d+):\d+: error: use of undeclared label 'loc_([0-9A-Fa-f]{8})'")
 INVALID = re.compile(
     r"invalid or unregistered function at guest address 0x([0-9A-Fa-f]+)")
+# codegen Validate: "0xTARGET from 0xCALLER: ... target not in any function"
+UNRESOLVED = re.compile(
+    r"0x([0-9A-Fa-f]+) from 0x[0-9A-Fa-f]+.*?target not in any function")
 
 
 def _read_text(path):
@@ -116,6 +119,11 @@ def heal_boundaries(build_log, gen_dir, toml_path):
 def invalid_functions_from_text(txt):
     """Distinct guest addresses the dispatcher flagged as unregistered."""
     return sorted(set(int(m.group(1), 16) for m in INVALID.finditer(txt)))
+
+
+def unresolved_calls_from_text(txt):
+    """Tail-call targets codegen's Validate phase couldn't place in a function."""
+    return sorted(set(int(m.group(1), 16) for m in UNRESOLVED.finditer(txt)))
 
 
 def invalid_functions(run_log):

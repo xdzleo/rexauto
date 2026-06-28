@@ -194,11 +194,10 @@ def stage_jumptables(ctx):
         return ctx.mark("jumptables", {"skipped": "no-python"})
     image = os.path.join(ctx.work, "%s_image.bin" % ctx.name)
     ctx.log("dumping decompressed image + reading section ranges")
-    r = rexglue(ctx, "--log-level", "trace", "codegen", ctx.manifest,
-                env={"REX_DUMP_IMAGE": image}, capture=True)
-    blob = (r.stdout or "") + (r.stderr or "")
-    if r.returncode != 0:
-        ctx.log("codegen (for image dump) failed rc=%d -> skipping jump tables" % r.returncode)
+    try:
+        blob = do_codegen(ctx, env={"REX_DUMP_IMAGE": image}, level="trace")
+    except SystemExit as ex:
+        ctx.log("codegen (for image dump) failed -> skipping jump tables (%s)" % ex)
         return ctx.mark("jumptables", {"skipped": "codegen-fail"})
     if not os.path.exists(image):
         ctx.log("image dump produced nothing (rexglue likely lacks the dump-image patch) "
@@ -259,11 +258,26 @@ def write_build_bat(ctx):
     return bat
 
 
-def do_codegen(ctx):
-    r = rexglue(ctx, "--log-level", "error", "codegen", ctx.manifest, capture=True)
-    if r.returncode != 0:
-        tail = "\n".join((r.stderr or r.stdout or "").splitlines()[-15:])
-        raise SystemExit("[rexauto] codegen FAILED (rc=%d) — aborting\n%s" % (r.returncode, tail))
+def do_codegen(ctx, env=None, level="error"):
+    """Run codegen, auto-registering unresolved tail-call targets (codegen's
+    Validate phase reports them) until it passes. Returns the captured output
+    (at trace level it carries the section ranges the jumptables stage needs)."""
+    for _ in range(10):
+        r = rexglue(ctx, "--log-level", level, "codegen", ctx.manifest, env=env, capture=True)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode == 0:
+            return out
+        targets = _heal.unresolved_calls_from_text(out)
+        if not targets:
+            tail = "\n".join(out.splitlines()[-15:])
+            raise SystemExit("[rexauto] codegen FAILED (rc=%d) — aborting\n%s" % (r.returncode, tail))
+        n = _heal.register_functions(targets, ctx.functions)
+        ctx.log("  codegen: %d unresolved tail-call target(s) -> registered %d; retrying"
+                % (len(targets), n))
+        if n == 0:
+            raise SystemExit("[rexauto] codegen stuck on unresolved calls: %s"
+                             % ", ".join("0x%X" % t for t in targets))
+    raise SystemExit("[rexauto] codegen unresolved-call heal did not converge")
 
 
 def do_build(ctx, bat):
