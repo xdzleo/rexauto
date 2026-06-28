@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+*.zip
+rexglue/
+xenon-jumptables/
+autoports/
+.rexauto_state

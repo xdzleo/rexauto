@@ -1,0 +1,13 @@
+rexauto bundles, in its release packages only (not in this source tree), a
+prebuilt copy of the ReXGlue SDK to make first-run setup one click:
+
+  ReXGlue — Copyright (c) 2026 Tom Clay <tomc@tctechstuff.com>
+  BSD 3-Clause License. Portions derived from the Xenia project
+  (Copyright Ben Vanik and contributors, BSD 3-Clause).
+
+The ReXGlue binaries are redistributed under the terms of the BSD 3-Clause
+License, which permits binary redistribution with attribution. Their license
+text ships alongside the binaries in the release archive (rexglue/sdk/licenses).
+
+The jump-table recovery scripts bundled for the jumptables stage are from
+xenon-jumptables (Copyright xdzleo, BSD 3-Clause).
