@@ -43,7 +43,7 @@ sys.path.insert(0, HERE)
 import extract as _extract
 import heal as _heal
 
-STAGES = ["extract", "init", "jumptables", "build", "runheal", "run"]
+STAGES = ["extract", "init", "setjmp", "jumptables", "build", "runheal", "run"]
 MAX_BUILD_ATTEMPTS = 12
 
 
@@ -202,6 +202,60 @@ def _tail_idalog(ctx, idalog, stop):
         except OSError:
             pass
         time.sleep(0.4)
+
+
+def stage_setjmp(ctx):
+    """Detect the statically-linked CRT setjmp/longjmp routines and record their
+    guest addresses in the manifest, so codegen emits ppc_setjmp/ppc_longjmp at
+    those call sites.
+
+    Xbox 360 C++ exception handling is linked straight into the title. longjmp is
+    a *non-local* jump (mass-restore of GPR/FPR/VMX + the stack pointer from a
+    jmp_buf, then blr). The recompiler turns blr into a plain C++ `return`, so
+    without these addresses set, a guest longjmp returns to its immediate caller,
+    the caller skips its epilogue, a non-volatile register is left corrupted and
+    the title crashes at startup (a near-null write). Detecting and configuring
+    them is what lets exception-using titles boot. Titles that don't use C++
+    exceptions have no signature and are left untouched."""
+    try:
+        import detect_setjmp as _dj
+    except Exception as ex:
+        ctx.log("detect_setjmp unavailable -> skipping setjmp/longjmp detection (%s)" % ex)
+        return ctx.mark("setjmp", {"skipped": "no-module"})
+    image = os.path.join(ctx.work, "%s_image.bin" % ctx.name)
+    ctx.log("scanning image for setjmp/longjmp (C++ exception support)")
+    try:
+        blob = do_codegen(ctx, env={"REX_DUMP_IMAGE": image}, level="trace")
+    except SystemExit as ex:
+        ctx.log("codegen for image dump failed -> skipping setjmp detection (%s)" % ex)
+        return ctx.mark("setjmp", {"skipped": "codegen-fail"})
+    if not os.path.exists(image):
+        ctx.log("image dump produced nothing (rexglue lacks the dump-image patch) "
+                "-> skipping setjmp detection")
+        return ctx.mark("setjmp", {"skipped": "no-dump"})
+    bm = re.search(r"base=0x([0-9A-Fa-f]+), size=0x([0-9A-Fa-f]+)", blob)
+    base = int(bm.group(1), 16) if bm else 0x82000000
+    secs = re.findall(r"section '([^']+)' at 0x([0-9A-Fa-f]+) size 0x([0-9A-Fa-f]+) exec=(\w+)", blob)
+    exec_secs = [(int(a, 16), int(a, 16) + int(sz, 16))
+                 for _, a, sz, ex in secs if ex.lower() in ("true", "1")]
+    if not exec_secs:
+        ctx.log("could not parse exec sections -> skipping setjmp detection")
+        return ctx.mark("setjmp", {"skipped": "no-sections"})
+    try:
+        res = _dj.detect(image, exec_secs, base)
+    except Exception as ex:
+        ctx.log("setjmp detection error -> skipping (%s)" % ex)
+        return ctx.mark("setjmp", {"skipped": "detect-error"})
+    lj, sj = res.get("longjmp_address"), res.get("setjmp_address")
+    if lj is None:
+        ctx.log("no setjmp/longjmp signature found (title likely uses no C++ exceptions) -> ok")
+        return ctx.mark("setjmp", {"found": False})
+    if sj is None:
+        ctx.log("longjmp 0x%X found but setjmp ambiguous (%s) -> need both; skipping write" % (lj, res))
+        return ctx.mark("setjmp", {"longjmp": "0x%X" % lj, "setjmp": "ambiguous"})
+    _dj.write_addresses(ctx.manifest, longjmp=lj, setjmp=sj)
+    ctx.log("setjmp/longjmp detected -> setjmp=0x%X longjmp=0x%X (written to manifest)" % (sj, lj))
+    ctx.mark("setjmp", {"setjmp": "0x%X" % sj, "longjmp": "0x%X" % lj})
 
 
 def stage_jumptables(ctx):
@@ -379,6 +433,18 @@ def do_build(ctx, bat):
     return logp, p.wait()
 
 
+def write_game_root(ctx):
+    """Drop a 'game_root.txt' sidecar next to the exe naming the game data dir, so
+    double-clicking the exe (no --game_data_root) still launches the title -- the
+    runtime reads this when the flag is absent."""
+    try:
+        if ctx.game and os.path.isdir(ctx.game):
+            with open(os.path.join(ctx.builddir, "game_root.txt"), "w", encoding="utf-8") as f:
+                f.write(os.path.abspath(ctx.game) + "\n")
+    except OSError as ex:
+        ctx.log("could not write game_root.txt sidecar (%s)" % ex)
+
+
 def stage_build(ctx):
     miss = [k for k in ("vcvars", "clang", "clangxx", "sdk") if not ctx.env[k]]
     if miss:
@@ -391,6 +457,7 @@ def stage_build(ctx):
         logp, rc = do_build(ctx, bat)
         txt = _heal._read_text(logp)
         if rc == 0 and os.path.exists(ctx.exe):
+            write_game_root(ctx)
             ctx.log("build OK -> %s" % ctx.exe)
             return ctx.mark("build", {"exe": ctx.exe})
         if "use of undeclared label" in txt:
@@ -519,8 +586,9 @@ def main():
         raise SystemExit("--only %s: unknown stage" % args.only)
 
     state = ctx.load_state()
-    fns = {"extract": stage_extract, "init": stage_init, "jumptables": stage_jumptables,
-           "build": stage_build, "runheal": stage_runheal, "run": stage_run}
+    fns = {"extract": stage_extract, "init": stage_init, "setjmp": stage_setjmp,
+           "jumptables": stage_jumptables, "build": stage_build, "runheal": stage_runheal,
+           "run": stage_run}
     start = order.index(args.from_stage) if args.from_stage else 0
     selected = [args.only] if args.only else order[start:]
 

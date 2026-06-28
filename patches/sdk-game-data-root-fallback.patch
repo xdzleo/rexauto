@@ -1,0 +1,51 @@
+diff --git a/src/ui/rex_app.cpp b/src/ui/rex_app.cpp
+index 8abe75e..1a3cd32 100644
+--- a/src/ui/rex_app.cpp
++++ b/src/ui/rex_app.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <rex/rex_app.h>
+ 
++#include <fstream>
++
+ #include <rex/cvar.h>
+ #include <rex/ui/flags.h>
+ #include <rex/kernel/crt/heap.h>
+@@ -81,6 +83,37 @@ bool ReXApp::SetupEnvironment() {
+   std::string game_data_cvar = REXCVAR_GET(game_data_root);
+   if (!game_data_cvar.empty()) {
+     game_dir = game_data_cvar;
++  } else {
++    // No --game_data_root on the command line (e.g. the user just double-clicked
++    // the exe). Fall back so the title still launches, taking the first location
++    // that actually holds the title (default.xex):
++    //   1) a "game_root.txt" sidecar next to the exe naming the data path
++    //      (written by the build pipeline; lets the data live anywhere),
++    //   2) a "game" folder next to the exe,
++    //   3) the exe's own folder.
++    auto has_title = [](const std::filesystem::path& p) {
++      std::error_code ec;
++      return std::filesystem::exists(p / "default.xex", ec) ||
++             std::filesystem::exists(p / "Default.xex", ec);
++    };
++    std::error_code ec;
++    auto sidecar = exe_dir / "game_root.txt";
++    if (std::filesystem::exists(sidecar, ec)) {
++      std::ifstream f(sidecar);
++      std::string line;
++      std::getline(f, line);
++      auto a = line.find_first_not_of(" \t\r\n\"");
++      auto b = line.find_last_not_of(" \t\r\n\"");
++      if (a != std::string::npos) {
++        line = line.substr(a, b - a + 1);
++        if (!line.empty() && has_title(line))
++          game_dir = line;
++      }
++    }
++    if (game_dir.empty() && has_title(exe_dir / "game"))
++      game_dir = exe_dir / "game";
++    if (game_dir.empty() && has_title(exe_dir))
++      game_dir = exe_dir;
+   }
+ 
+   // User data: cvar override, or platform user directory

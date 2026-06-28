@@ -404,6 +404,7 @@ cstage.addEventListener('pointerleave',()=>{card.style.transform='';});
 const STAGES=[
   ['extract','Extract','container → game files'],
   ['init','Initialize','scaffold ReXGlue project'],
+  ['setjmp','Exceptions','detect setjmp/longjmp'],
   ['jumptables','Jump Tables','recover bctr switches (IDA)'],
   ['build','Recompile','build + self-heal boundaries'],
   ['runheal','Boot-Heal','register runtime functions'],
@@ -458,8 +459,13 @@ document.getElementById('container').addEventListener('input',e=>{
   if(v.length<4)return;
   metaTimer=setTimeout(async()=>{ try{
     const r=await fetch('/api/meta?container='+encodeURIComponent(v)); const m=await r.json();
-    m.container=v; applyMeta(m); if(m.title&&document.getElementById('name').value==='game')
-      document.getElementById('name').value=m.title.toLowerCase().replace(/[^a-z0-9]+/g,'').slice(0,16)||'game';
+    m.container=v; applyMeta(m);
+    const nameEl=document.getElementById('name');
+    if(m.title&&(nameEl.value===''||nameEl.value==='game')){
+      let n=m.title.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,40).replace(/_+$/,'');
+      if(/^[0-9]/.test(n))n='g_'+n;
+      nameEl.value=n||'game';
+    }
   }catch(_){}} ,450);
 });
 
