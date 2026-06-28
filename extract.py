@@ -144,22 +144,57 @@ class Stfs:
         return "/".join(reversed(parts))
 
 
+def title_from_filename(container):
+    """A human-readable game title guessed from a container path: drop the
+    extension and the region/dump tags '(USA, Europe)', '[!]', etc.
+    'Captain America - Super Soldier (USA, Europe).iso' -> 'Captain America - Super Soldier'."""
+    import re
+    if not container:
+        return None
+    base = os.path.basename(str(container).rstrip("/\\"))
+    stem = base if os.path.isdir(container) else os.path.splitext(base)[0]
+    stem = re.sub(r"[\(\[\{][^\)\]\}]*[\)\]\}]", "", stem)   # strip (...) [...] {...}
+    stem = re.sub(r"\s+", " ", stem).strip(" -_.")
+    return stem or None
+
+
+def project_name_from_title(title, fallback="game"):
+    """Sanitize a title into a valid rexglue project identifier
+    (lowercase letters/digits/underscore, not starting with a digit)."""
+    import re
+    if not title:
+        return fallback
+    n = re.sub(r"[^a-z0-9]+", "_", title.lower()).strip("_")[:40].strip("_")
+    if not n or n[0].isdigit():
+        n = "g_" + n if n else fallback
+    return n or fallback
+
+
 def read_package_meta(container):
-    """Best-effort (title, title_id, cover_png_bytes) from an STFS package header.
-    Returns a dict with None fields if unavailable (e.g. a plain folder)."""
+    """Best-effort (title, title_id, cover_png_bytes) from a container.
+    STFS packages yield the real title/id/cover from the header; ISO/GoD/folder
+    containers fall back to a title derived from the file name (so the GUI still
+    shows a sensible name instead of the generic 'game'). None fields if nothing
+    is available."""
     meta = {"title": None, "title_id": None, "cover": None}
+    fallback_title = title_from_filename(container)
     try:
         if os.path.isdir(container):
+            meta["title"] = fallback_title
             return meta
         with open(container, "rb") as f:
             d = f.read(0xC000)
     except Exception:
+        meta["title"] = fallback_title
         return meta
     if d[:4] not in (b"CON ", b"LIVE", b"PIRS"):
+        # ISO (GDFX), GoD (SVOD) or anything else: no STFS header -> use the
+        # file name as the display title.
+        meta["title"] = fallback_title
         return meta
     try:
         name = d[0x411:0x411 + 0x80].decode("utf-16-be", "ignore").split("\x00")[0].strip()
-        meta["title"] = name or None
+        meta["title"] = name or fallback_title
     except Exception:
         pass
     try:

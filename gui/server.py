@@ -240,9 +240,15 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(length) or b"{}")
         if u.path == "/api/start":
-            HUB.start(data.get("container", "").strip().strip('"'),
-                      data.get("name", "game").strip() or "game",
-                      bool(data.get("run")))
+            container = data.get("container", "").strip().strip('"')
+            name = (data.get("name") or "").strip()
+            if not name or name == "game":
+                # Derive a real project name from the package title / file name
+                # instead of the generic 'game'.
+                meta = _extract.read_package_meta(container)
+                name = _extract.project_name_from_title(
+                    meta.get("title") or _extract.title_from_filename(container))
+            HUB.start(container, name, bool(data.get("run")))
             return self._send(200, "application/json", json.dumps({"ok": True}))
         if u.path == "/api/stop":
             HUB.stop()
