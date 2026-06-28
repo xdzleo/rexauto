@@ -28,6 +28,7 @@ VCVARS / JT_REPO.
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -258,14 +259,43 @@ def write_build_bat(ctx):
     return bat
 
 
+def _gen_snapshot(ctx):
+    """md5 + mtime of the generated units, to detect what a re-codegen changed."""
+    snap = {}
+    for p in glob.glob(os.path.join(ctx.gen, "*.cpp")) + glob.glob(os.path.join(ctx.gen, "*.h")):
+        try:
+            snap[p] = (hashlib.md5(open(p, "rb").read()).digest(), os.path.getmtime(p))
+        except OSError:
+            pass
+    return snap
+
+
+def _gen_restore_unchanged(ctx, snap):
+    """Restore the mtime of regenerated files whose content didn't actually
+    change, so ninja skips recompiling them. Lossless: ninja still rebuilds on
+    real content changes (and on header changes, via its depfiles)."""
+    kept = 0
+    for p, (h, mt) in snap.items():
+        try:
+            if os.path.exists(p) and hashlib.md5(open(p, "rb").read()).digest() == h:
+                os.utime(p, (mt, mt))
+                kept += 1
+        except OSError:
+            pass
+    if kept:
+        ctx.log("  reusing %d unchanged unit(s) — incremental rebuild" % kept)
+
+
 def do_codegen(ctx, env=None, level="error"):
     """Run codegen, auto-registering unresolved tail-call targets (codegen's
     Validate phase reports them) until it passes. Returns the captured output
     (at trace level it carries the section ranges the jumptables stage needs)."""
+    snap = _gen_snapshot(ctx)
     for _ in range(10):
         r = rexglue(ctx, "--log-level", level, "codegen", ctx.manifest, env=env, capture=True)
         out = (r.stdout or "") + (r.stderr or "")
         if r.returncode == 0:
+            _gen_restore_unchanged(ctx, snap)
             return out
         targets = _heal.unresolved_calls_from_text(out)
         if not targets:
