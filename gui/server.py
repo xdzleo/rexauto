@@ -32,7 +32,7 @@ for _p in (ROOT, HERE, getattr(sys, "_MEIPASS", "")):
 import extract as _extract  # noqa: E402
 import setup as _setup  # noqa: E402
 
-STAGES = ["extract", "init", "jumptables", "build", "runheal", "run"]
+STAGES = ["extract", "init", "setjmp", "jumptables", "build", "runheal", "run"]
 PORT = int(os.environ.get("REXAUTO_GUI_PORT", "7575"))
 FROZEN = getattr(sys, "frozen", False)
 
@@ -188,6 +188,7 @@ class Hub:
 _STAGE_HEADLINE = {
     "extract": "Extracting game from container",
     "init": "Scaffolding ReXGlue project",
+    "setjmp": "Detecting setjmp/longjmp",
     "jumptables": "Recovering jump tables (IDA)",
     "build": "Recompiling + self-healing boundaries",
     "runheal": "Booting + registering functions",
