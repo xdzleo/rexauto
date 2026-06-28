@@ -191,6 +191,128 @@ def _find_default_xex(folder):
     return sorted(cands, key=len)[0] if cands else None
 
 
+GDFX_MAGIC = b"MICROSOFT*XBOX*MEDIA"
+
+
+def _walk_gdfx(read_sector, root_sector, root_size):
+    """Walk the GDFX (Xbox disc) directory tree -> [(relpath, sector, size)]."""
+    files = []
+
+    def read_dir(sector, size, prefix):
+        data = read_sector(sector, (size + 0x7FF) & ~0x7FF)
+        seen, stack = set(), [0]
+        while stack:
+            pos = stack.pop()
+            if pos in seen:
+                continue
+            seen.add(pos)
+            o = pos * 4
+            if o + 0x0E > len(data):
+                continue
+            left, right = struct.unpack_from("<HH", data, o)
+            sec, sz = struct.unpack_from("<II", data, o + 4)
+            attr, nlen = data[o + 0x0C], data[o + 0x0D]
+            name = data[o + 0x0E:o + 0x0E + nlen].decode("latin-1", "ignore")
+            if left not in (0, 0xFFFF):
+                stack.append(left)
+            if right not in (0, 0xFFFF):
+                stack.append(right)
+            if not name or name in (".", ".."):
+                continue
+            rel = (prefix + "/" + name) if prefix else name
+            if attr & 0x10:
+                if sz:
+                    read_dir(sec, sz, rel)
+            else:
+                files.append((rel, sec, sz))
+    read_dir(root_sector, root_size, "")
+    return files
+
+
+def _gdfx_extract(read_sector, out_dir, log, only=None):
+    """Extract a GDFX filesystem (via read_sector(sector, nbytes)) to out_dir."""
+    vd = read_sector(32, 0x800)            # volume descriptor @ sector 32 (0x10000)
+    if vd[:20] != GDFX_MAGIC:
+        raise SystemExit("no GDFX volume found (layout not handled) — try converting to ISO")
+    root_sector, root_size = struct.unpack_from("<II", vd, 0x14)
+    files = _walk_gdfx(read_sector, root_sector, root_size)
+    log("GDFX volume: %d files" % len(files))
+    xex = None
+    written = 0
+    for rel, sec, sz in files:
+        leaf = rel.rsplit("/", 1)[-1]
+        if only and leaf.lower() != only:
+            continue
+        dst = os.path.normpath(os.path.join(out_dir, rel.replace("/", os.sep)))
+        if os.path.commonpath([os.path.abspath(out_dir), os.path.abspath(dst)]) != \
+           os.path.abspath(out_dir):
+            continue
+        if not (os.path.exists(dst) and os.path.getsize(dst) == sz):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "wb") as o:
+                remaining, s = sz, sec
+                while remaining > 0:
+                    n = min(1 << 20, remaining)
+                    o.write(read_sector(s, (n + 0x7FF) & ~0x7FF)[:n])
+                    remaining -= n
+                    s += ((n + 0x7FF) & ~0x7FF) // 0x800
+            written += sz
+        if leaf.lower() == "default.xex":
+            xex = dst
+    log("extracted (%.0f MB) -> %s" % (written / 1e6, out_dir))
+    return xex
+
+
+def _iso_base(path):
+    with open(path, "rb") as f:
+        for base in (0, 0xFD90000, 0x2080000, 0x18300000, 0xB000):
+            f.seek(base + 0x10000)
+            if f.read(20) == GDFX_MAGIC:
+                return base
+    return None
+
+
+def _svod_reader(src, hdr, log):
+    """Build a GDFX read_sector over an SVOD (GoD) container, single-file layout.
+    Implemented from rexglue's BlockToOffsetSVOD; validated by the GDFX magic
+    check in _gdfx_extract, so a layout it gets wrong fails loudly, not silently."""
+    vd = 0x379
+    egdf = bool(hdr[vd + 0x18] & 0x40)
+    start_data_block = u24le(hdr[vd + 0x1C:vd + 0x1F])
+    data_file_count = struct.unpack_from(">I", hdr, 0x39D)[0]
+    if data_file_count > 1:
+        raise SystemExit("multi-part GoD (%d data files) is not handled — convert to ISO"
+                         % data_file_count)
+    f = open(src, "rb")
+    svod_base_offset = 0
+    for off, lay in ((0x2000, "egdf"), (0x12000, "xsf"), (0xD000, "single")):
+        f.seek(off)
+        if f.read(20) == GDFX_MAGIC:
+            svod_base_offset = {"egdf": 0, "xsf": 0x10000, "single": 0xB000}[lay]
+            log("SVOD layout: %s (magic @0x%X)" % (lay, off))
+            break
+    BPF, MAXF = 0x14388, 0xA290000
+
+    def block_to_offset(block):
+        tb = block - start_data_block * 2 + (2 if egdf else 0)
+        fb, fi = tb % BPF, tb // BPF
+        l0 = fb // 0x198 + 1
+        offset = l0 * 0x1000 + (l0 // 0xA1C4 + 1) * 0x1000 + svod_base_offset
+        addr = fb * 0x800 + offset
+        if addr >= MAXF:
+            fi += 1
+            addr = addr % MAXF + 0x2000
+        return addr
+
+    def read_sector(sector, n):
+        out = bytearray()
+        for i in range((n + 0x7FF) // 0x800):
+            f.seek(block_to_offset(sector + i))
+            out += f.read(0x800)
+        return bytes(out[:n])
+    return read_sector
+
+
 def extract_container(src, out_dir, log=print):
     """Return (default_xex_path, game_dir). game_dir is the folder to use as the
     ReXGlue game root (it always contains the returned default.xex)."""
@@ -213,8 +335,16 @@ def extract_container(src, out_dir, log=print):
         return dst, out_dir
 
     with open(src, "rb") as f:
-        magic = f.read(4)
+        head = f.read(0xC000)
+    magic = head[:4]
     if magic in (b"CON ", b"LIVE", b"PIRS"):
+        vol_type = struct.unpack_from(">I", head, 0x3A9)[0] if len(head) > 0x3AD else 0
+        if vol_type == 1:                  # SVOD volume = GoD
+            log("GoD / SVOD container")
+            xex = _gdfx_extract(_svod_reader(src, head, log), out_dir, log)
+            if not xex:
+                raise SystemExit("no default.xex in the GoD image")
+            return xex, out_dir
         s = Stfs(src)
         ents = s.file_table()
         files = [(i, e) for i, e in enumerate(ents) if not e["directory"]]
@@ -242,9 +372,21 @@ def extract_container(src, out_dir, log=print):
             raise SystemExit("no default.xex in STFS package")
         return xex, out_dir
 
+    base = _iso_base(src)
+    if base is not None:
+        log("Xbox 360 ISO (GDFX base 0x%X)" % base)
+        f = open(src, "rb")
+
+        def rd(sector, n):
+            f.seek(base + sector * 0x800)
+            return f.read(n)
+        xex = _gdfx_extract(rd, out_dir, log)
+        if not xex:
+            raise SystemExit("no default.xex in the ISO")
+        return xex, out_dir
+
     raise SystemExit(
-        "unsupported container (magic=%r). GoD/SVOD and raw ISO are not handled here; "
-        "extract default.xex + assets first (e.g. god2iso.ps1) and pass the folder." % magic)
+        "unsupported container (magic=%r) — not STFS, GoD, ISO, a folder, or a raw XEX." % magic)
 
 
 if __name__ == "__main__":

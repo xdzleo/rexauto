@@ -32,8 +32,9 @@ self-heal loops a fresh title needs — then launches it.
 
 ## What each stage does
 
-1. **extract** — STFS package (`CON`/`LIVE`/`PIRS`, the XBLA/DLC layout) →
-   `default.xex` + all assets. An already-extracted folder is used as-is.
+1. **extract** — reads the container → `default.xex` + all assets:
+   **STFS** (`CON`/`LIVE`/`PIRS`, XBLA/DLC), **ISO** (GDFX/XDVDFS disc image),
+   **GoD** (SVOD, single-file), or an **already-extracted folder** (used in place).
 2. **init** — `rexglue init` scaffolds the project.
 3. **jumptables** — if IDA is present, dumps the decompressed image and recovers
    `bctr` jump tables into `switch_tables.toml`
