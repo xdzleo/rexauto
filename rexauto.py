@@ -35,6 +35,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -182,6 +183,27 @@ def stage_init(ctx):
     ctx.mark("init")
 
 
+def _tail_idalog(ctx, idalog, stop):
+    """Stream the IDA pass's [xjt] progress lines to the UI while it runs."""
+    seen = 0
+    while not stop.is_set():
+        try:
+            if os.path.exists(idalog):
+                lines = open(idalog, errors="ignore").read().splitlines()
+                for l in lines[seen:]:
+                    if "[xjt]" in l:
+                        msg = l.split("[xjt]", 1)[1].strip()
+                        if msg.startswith("progress "):
+                            msg = msg[9:]
+                        if any(k in msg for k in ("defining", "scanning", "analyzing",
+                                                  "round", "functions=")):
+                            ctx.log("@jump tables: " + msg)
+                seen = len(lines)
+        except OSError:
+            pass
+        time.sleep(0.4)
+
+
 def stage_jumptables(ctx):
     if not ctx.env["idat"]:
         ctx.log("IDA not found -> skipping jump-table recovery (built-in switch handling "
@@ -226,12 +248,22 @@ def stage_jumptables(ctx):
         ctx.log("extract_funcs failed -> skipping jump tables")
         return ctx.mark("jumptables", {"skipped": "extract-funcs-fail"})
     cfg = os.path.join(ctx.work, "%s_jt.json" % ctx.name)
+    out_json = os.path.join(ctx.work, "jumptables.json")
     json.dump({"image": image, "image_base": hex(base), "image_end": hex(image_end),
-               "text_start": hex(text_start), "text_end": hex(text_end),
+               "text_start": hex(text_start), "text_end": hex(text_end), "output": out_json,
                "functions": funcs, "format": "rexglue", "toml": ctx.switches}, open(cfg, "w"))
-    ctx.log("recovering jump tables (IDA, a few minutes)")
+    idalog = out_json + ".idalog.txt"
+    try:
+        if os.path.exists(idalog):
+            os.remove(idalog)
+    except OSError:
+        pass
+    ctx.log("recovering jump tables (IDA)")
+    stop = threading.Event()
+    threading.Thread(target=_tail_idalog, args=(ctx, idalog, stop), daemon=True).start()
     rr = run([ctx.env["python"], os.path.join(ctx.env["jt_repo"], "src", "recover.py"),
               cfg, "--ida", ctx.env["idat"]])
+    stop.set()
     if rr.returncode != 0 or not os.path.exists(ctx.switches):
         ctx.log("jump-table recovery failed -> continuing without it")
         return ctx.mark("jumptables", {"skipped": "recover-fail"})

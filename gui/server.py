@@ -165,7 +165,7 @@ class Hub:
             if body.startswith("@"):                 # live progress, headline only
                 prog = body[1:]
                 self.emit({"type": "status", "text": prog})
-                m = re.match(r"build (\d+)/(\d+)", prog)
+                m = re.search(r"(\d+)\s*/\s*(\d+)", prog)   # any N/M -> progress bar
                 if m:
                     self.emit({"type": "buildprogress",
                                "done": int(m.group(1)), "total": int(m.group(2))})
