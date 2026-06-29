@@ -67,26 +67,73 @@ def _func_at(rows, line):
     return best
 
 
-def load_overrides(toml_path):
-    """addr -> end (or None for a bare {} registration)."""
+def load_overrides_full(toml_path):
+    """addr -> {"end", "parent", "size", "name"} (each None if absent). Lossless for the
+    [functions] entries -- preserves chunk `parent` links and custom names that the
+    end-only loader used to silently drop (which would split those functions on rewrite)."""
     ov = {}
     if os.path.exists(toml_path):
-        for m in re.finditer(r'"0x([0-9A-Fa-f]+)"\s*=\s*\{([^}]*)\}', open(toml_path).read()):
+        txt = _read_text(toml_path)
+        fm = re.search(r'\[functions\](.*)', txt, re.S)   # ignore [meta] etc.
+        body_all = fm.group(1) if fm else txt
+        for m in re.finditer(r'"0x([0-9A-Fa-f]+)"\s*=\s*\{([^}]*)\}', body_all):
             a = int(m.group(1), 16)
-            ee = re.search(r'end\s*=\s*0x([0-9A-Fa-f]+)', m.group(2))
-            ov[a] = int(ee.group(1), 16) if ee else None
+            b = m.group(2)
+
+            def _hex(key, body=b):
+                mm = re.search(key + r'\s*=\s*0x([0-9A-Fa-f]+)', body)
+                return int(mm.group(1), 16) if mm else None
+            nm = re.search(r'name\s*=\s*"([^"]*)"', b)
+            ov[a] = {"end": _hex("end"), "parent": _hex("parent"),
+                     "size": _hex("size"), "name": nm.group(1) if nm else None}
     return ov
 
 
-def write_overrides(toml_path, ov):
-    lines = ["# Boundary/function overrides auto-healed by rexauto.",
-             "# `end` = extend a function the recompiler split mid-flow;",
-             "# `{}`  = a function discovered at runtime by the heal loop.",
-             "", "[functions]"]
+def _fmt_entry(attrs):
+    parts = []
+    if attrs.get("size"):
+        parts.append("size = 0x%X" % attrs["size"])
+    if attrs.get("end"):
+        parts.append("end = 0x%X" % attrs["end"])
+    if attrs.get("parent"):
+        parts.append("parent = 0x%X" % attrs["parent"])
+    if attrs.get("name"):
+        parts.append('name = "%s"' % attrs["name"])
+    return "{ %s }" % ", ".join(parts) if parts else "{}"
+
+
+def write_overrides_full(toml_path, ov):
+    """Write addr -> {end,parent,size,name} losslessly. Preserves any [meta] block."""
+    meta = ""
+    if os.path.exists(toml_path):
+        mm = re.search(r'(\[meta\].*?)\n\[functions\]', _read_text(toml_path), re.S)
+        if mm:
+            meta = mm.group(1).rstrip() + "\n\n"
+    header = ("# Boundary/function overrides auto-healed by rexauto.\n"
+              "# `end` = extend a function the recompiler split mid-flow;\n"
+              "# `parent` = a chunk (address-taken sub-entry) of a parent function;\n"
+              "# `{}`  = a function discovered at runtime by the heal loop.\n\n")
+    out = header + meta + "[functions]\n"
     for a in sorted(ov):
-        lines.append('"0x%08X" = { end = 0x%08X }' % (a, ov[a]) if ov[a]
-                     else '"0x%08X" = {}' % a)
-    open(toml_path, "w").write("\n".join(lines) + "\n")
+        out += '"0x%08X" = %s\n' % (a, _fmt_entry(ov[a]))
+    open(toml_path, "w").write(out)
+
+
+def load_overrides(toml_path):
+    """Back-compat: addr -> end (or None). `parent`/`name`/`size` stay on disk and are
+    preserved across writes -- see write_overrides."""
+    return {a: v["end"] for a, v in load_overrides_full(toml_path).items()}
+
+
+def write_overrides(toml_path, ov):
+    """Back-compat for end-only callers. Merges the given {addr: end_or_None} onto the
+    on-disk full set so chunk `parent` links (and names) are never dropped."""
+    full = load_overrides_full(toml_path)
+    for a, end in ov.items():
+        attrs = full.get(a) or {"end": None, "parent": None, "size": None, "name": None}
+        attrs["end"] = end
+        full[a] = attrs
+    write_overrides_full(toml_path, full)
 
 
 def heal_boundaries(build_log, gen_dir, toml_path):
