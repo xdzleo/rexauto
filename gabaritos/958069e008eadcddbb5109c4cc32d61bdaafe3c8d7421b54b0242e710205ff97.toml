@@ -1,0 +1,17 @@
+# rexauto gabarito -- pre-discovered cures for "dragon_ball_z_ultimate_tenkaichi" (10)
+[meta]
+name = "dragon_ball_z_ultimate_tenkaichi"
+xex_sha256 = "958069e008eadcddbb5109c4cc32d61bdaafe3c8d7421b54b0242e710205ff97"
+cures = 10
+
+[functions]
+"0x82415F80" = {}
+"0x8243B848" = {}
+"0x8243B868" = {}
+"0x82441EF8" = {}
+"0x824422D8" = {}
+"0x82442A28" = {}
+"0x82444818" = {}
+"0x824BC338" = {}
+"0x824BCE68" = {}
+"0x826302C8" = {}

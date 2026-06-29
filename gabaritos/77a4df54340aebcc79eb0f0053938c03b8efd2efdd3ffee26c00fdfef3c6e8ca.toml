@@ -1,0 +1,21 @@
+# rexauto gabarito -- pre-discovered cures for "rayman3hd" (14)
+[meta]
+name = "rayman3hd"
+xex_sha256 = "77a4df54340aebcc79eb0f0053938c03b8efd2efdd3ffee26c00fdfef3c6e8ca"
+cures = 14
+
+[functions]
+"0x820EB140" = {}
+"0x8215F098" = {}
+"0x82162208" = {}
+"0x82162210" = {}
+"0x8216F9C0" = {}
+"0x821DFFD0" = {}
+"0x824967A8" = {}
+"0x8249DF48" = {}
+"0x824A06E0" = {}
+"0x824A3320" = {}
+"0x824A3C48" = {}
+"0x824A58C0" = {}
+"0x824A6BF8" = {}
+"0x825AE9B8" = {}

@@ -1,0 +1,8 @@
+# rexauto gabarito -- pre-discovered cures for "final_exam" (1)
+[meta]
+name = "final_exam"
+xex_sha256 = "1136203ac023e4005e9d1e87630c2ba0574641c13a9bea9545a3b4c48918b89c"
+cures = 1
+
+[functions]
+"0x828CC300" = {}

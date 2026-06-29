@@ -521,6 +521,8 @@ def stage_build(ctx):
         raise SystemExit("missing build tools: %s (set via env vars or install)" % ", ".join(miss))
     write_game_icon(ctx)
     bat = write_build_bat(ctx)
+    if not _heal.load_overrides(ctx.functions):  # fresh project -> seed from the shared gabarito
+        fetch_gabarito(ctx)
     last_ends = None
     for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
         ctx.log("codegen + build (attempt %d/%d)" % (attempt, MAX_BUILD_ATTEMPTS))
@@ -651,6 +653,8 @@ def stage_runheal(ctx):
                 verdict = ("survived %ds with no invalid-function fatal" % confirm_seconds) if calive \
                     else "exited without an invalid-function fatal (other stop - likely GPU/runtime)"
                 ctx.log("run-heal converged: %s" % verdict)
+                if getattr(ctx.args, "publish_gabarito", False):
+                    publish_gabarito(ctx)
                 return ctx.mark("runheal", {"iters": it, "alive": calive,
                                             "confirmed_seconds": confirm_seconds})
             ctx.log("  confirmation surfaced %d late fatal(s); continuing heal" % len(caddrs))
@@ -672,6 +676,8 @@ def stage_runheal(ctx):
                 ctx.log("  rebuild failed after registering 0x%X -> see %s" % (addrs[0], logp))
                 return ctx.mark("runheal", {"build_failed": True})
     ctx.log("run-heal hit max iterations (%d)" % ctx.args.heal_iters)
+    if getattr(ctx.args, "publish_gabarito", False):
+        publish_gabarito(ctx)
     ctx.mark("runheal", {"iters": ctx.args.heal_iters})
 
 
@@ -744,6 +750,67 @@ def verify_sdk_pin(env):
                 % (name, want, got, path))
 
 
+# --- Shared "gabarito" database: per-binary pre-discovered cures --------------
+# Once a title's heal has found its missing functions (the functions.toml
+# overrides), that set is identical for everyone running the SAME binary. Publish
+# it keyed by the default.xex hash so the next person seeds it and skips the slow
+# auto-cure cycle. Fetch is public / no-auth; a miss just falls back to healing.
+GABARITO_RAW = "https://raw.githubusercontent.com/xdzleo/rexauto/main/gabaritos"
+
+
+def gabarito_key(ctx):
+    """Exact per-binary key: sha256 of the entrypoint default.xex (cures are
+    address-specific, so they must match the exact code image)."""
+    try:
+        return _sha256(ctx.xex) if ctx.xex and os.path.exists(ctx.xex) else None
+    except Exception:
+        return None
+
+
+def fetch_gabarito(ctx):
+    """Seed functions.toml from the shared gabarito for this exact binary, if one
+    exists, so the heal starts (mostly) solved. Returns the number of cures seeded."""
+    if os.environ.get("REXAUTO_NO_GABARITO"):
+        return 0
+    key = gabarito_key(ctx)
+    if not key:
+        return 0
+    try:
+        import urllib.request
+        with urllib.request.urlopen("%s/%s.toml" % (GABARITO_RAW, key), timeout=15) as r:
+            body = r.read().decode("utf-8", "ignore")
+    except Exception:
+        return 0  # no gabarito for this binary -> heal from scratch
+    n = len(re.findall(r'"0x[0-9A-Fa-f]+"\s*=', body))
+    if n == 0:
+        return 0
+    with open(ctx.functions, "w", encoding="utf-8") as f:
+        f.write(body)
+    ctx.log("gabarito: seeded %d known cures from the shared database (xex %s…) -> "
+            "auto-heal short or skipped" % (n, key[:12]))
+    return n
+
+
+def publish_gabarito(ctx):
+    """Write this title's discovered cures as a gabarito file (keyed by xex hash) in
+    the repo's gabaritos/ folder, so it can be committed and shared."""
+    key = gabarito_key(ctx)
+    if not key or not os.path.exists(ctx.functions):
+        ctx.log("gabarito: nothing to publish")
+        return
+    src = open(ctx.functions, encoding="utf-8", errors="ignore").read()
+    m = re.search(r'\[functions\].*', src, re.S)
+    n = len(re.findall(r'"0x[0-9A-Fa-f]+"\s*=', src))
+    out_dir = os.path.join(HERE, "gabaritos")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, key + ".toml")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('# rexauto gabarito — pre-discovered cures for "%s" (%d)\n'
+                '[meta]\nname = "%s"\nxex_sha256 = "%s"\ncures = %d\n\n%s'
+                % (ctx.name, n, ctx.name, key, n, m.group(0) if m else "[functions]\n"))
+    ctx.log("gabarito: wrote gabaritos/%s.toml (%d cures) — commit it to share" % (key[:12], n))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -757,6 +824,8 @@ def main():
     ap.add_argument("--no-jumptables", action="store_true")
     ap.add_argument("--heal-iters", type=int, default=20)
     ap.add_argument("--run-seconds", type=int, default=22)
+    ap.add_argument("--publish-gabarito", action="store_true",
+                    help="write the discovered cures to gabaritos/ (keyed by xex hash) to share")
     args = ap.parse_args()
 
     env = detect_env()

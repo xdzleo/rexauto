@@ -1,0 +1,8 @@
+# rexauto gabarito -- pre-discovered cures for "game" (1)
+[meta]
+name = "game"
+xex_sha256 = "8653b966e74a6bcfe7535c6b23a287ccfe50d486a1e4c7ec083758a70c342d9f"
+cures = 1
+
+[functions]
+"0x82216DA0" = {}
