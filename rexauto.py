@@ -565,7 +565,11 @@ def run_once(ctx, seconds, discover=False):
         env = dict(os.environ)
         env["REX_HEAL_DISCOVER"] = "1"
     try:
-        p = subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir, env=env)
+        p = subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir, env=env,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True,
+                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     except OSError as ex:
         ctx.log("  could not launch the game: %s" % ex)
         return "", False
@@ -683,7 +687,14 @@ def stage_runheal(ctx):
 
 def stage_run(ctx):
     ctx.log("launching %s" % ctx.exe)
-    subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir)
+    # Detach the game from the pipeline's stdio. If it inherits the GUI Hub's stdout
+    # pipe, the Hub's reader blocks until the GAME exits -> the 'done' event never
+    # fires -> the GUI stays 'Recompiling' and you cannot start another game.
+    subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, close_fds=True,
+                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
     ctx.log("running. a game window should open. (GPU/playability is per-title and not "
             "auto-solved by rexauto.)")
 

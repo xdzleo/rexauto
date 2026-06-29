@@ -33,7 +33,7 @@ import extract as _extract  # noqa: E402
 import setup as _setup  # noqa: E402
 
 STAGES = ["extract", "init", "setjmp", "jumptables", "build", "runheal", "run"]
-PORT = int(os.environ.get("REXAUTO_GUI_PORT", "7575"))
+PORT = int(os.environ.get("PORT") or os.environ.get("REXAUTO_GUI_PORT") or "7575")
 FROZEN = getattr(sys, "frozen", False)
 
 
@@ -129,14 +129,20 @@ class Hub:
         except Exception as ex:
             self.emit({"type": "done", "ok": False, "message": "launch failed: %s" % ex})
             return
+        proc = self.proc
         ok = True
-        for line in self.proc.stdout:
-            self._parse(line.rstrip("\n"))
-            if "Traceback (most recent call last)" in line or "did not converge" in line:
+        try:
+            for line in proc.stdout:
+                self._parse(line.rstrip("\n"))
+                if "Traceback (most recent call last)" in line or "did not converge" in line:
+                    ok = False
+            if proc.wait() != 0:
                 ok = False
-        rc = self.proc.wait()
-        if rc != 0:
+        except Exception:
             ok = False
+        finally:
+            if self.proc is proc:
+                self.proc = None  # clear so the next game can start (only if still ours)
         # mark the active stage done if the run ended cleanly
         if ok and 0 <= self.stage_idx < len(STAGES):
             self.emit({"type": "stage", "stage": STAGES[self.stage_idx], "status": "done"})
