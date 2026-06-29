@@ -635,6 +635,57 @@ def stage_run(ctx):
 
 
 # --------------------------------------------------------------------------- main
+# --- SDK compatibility pin --------------------------------------------------
+# rexauto generates code with a specific rexglue codegen tool and links it
+# against a specific runtime. Mixing a DIFFERENT SDK build can silently produce
+# broken or crashing exes — the v1.3 fork migration changed the scaffolding and
+# the runtime ABI, exactly the kind of mismatch this guards against. rexauto
+# refuses to run against an SDK whose binaries don't match the ones it was built
+# and tested with. Override (advanced, may produce broken builds) by setting
+# REXAUTO_SKIP_SDK_CHECK=1. Bump these when the bundled SDK is updated.
+SDK_PIN = {
+    "rexglue.exe":    "c7145ef3648165c44786acf50ca085478871b9900e71c2945e4eef55155eca63",
+    "rexruntime.dll": "bdc9b414ab8fc92a8ddc266b2076934a974cb8c28b85ba07d691b2fdd950cf8d",
+}
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_sdk_pin(env):
+    """Refuse a mismatched SDK so an incompatible rexglue/runtime can't be used."""
+    if os.environ.get("REXAUTO_SKIP_SDK_CHECK"):
+        print("[rexauto] WARNING: SDK pin check skipped (REXAUTO_SKIP_SDK_CHECK) — "
+              "an incompatible SDK may produce broken builds")
+        return
+    rexglue = env.get("rexglue")
+    if not rexglue:
+        return
+    targets = [("rexglue.exe", rexglue),
+               ("rexruntime.dll", os.path.join(os.path.dirname(rexglue), "rexruntime.dll"))]
+    for name, path in targets:
+        want = SDK_PIN.get(name)
+        if not want or not path or not os.path.exists(path):
+            continue
+        got = _sha256(path)
+        if got != want:
+            raise SystemExit(
+                "[rexauto] SDK MISMATCH — refusing to run.\n"
+                "  %s does not match the SDK this rexauto was built and tested with.\n"
+                "    expected sha256 %s\n    found    sha256 %s\n    at %s\n"
+                "  Use the rexglue-sdk bundled with this rexauto release (extract it next\n"
+                "  to rexauto, or point REXSDK_DIR / REXGLUE at it). To override anyway\n"
+                "  (advanced — may produce broken or crashing builds): set "
+                "REXAUTO_SKIP_SDK_CHECK=1.\n"
+                % (name, want, got, path))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -657,6 +708,7 @@ def main():
                bool(env["idat"]), bool(env["vcvars"])))
     if not env["rexglue"]:
         raise SystemExit("rexglue.exe not found (set REXGLUE or build the ReXGlue SDK).")
+    verify_sdk_pin(env)
 
     order = STAGES[:]
     if args.no_jumptables:
