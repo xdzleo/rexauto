@@ -709,8 +709,11 @@ def stage_run(ctx):
 # and tested with. Override (advanced, may produce broken builds) by setting
 # REXAUTO_SKIP_SDK_CHECK=1. Bump these when the bundled SDK is updated.
 SDK_PIN = {
-    "rexglue.exe":    "47304c89e563dfe2ce7c0095bcff45258b8aa77acbae4274c5bb6c7cdf2c81a1",
-    "rexruntime.dll": "0289dcf61d51b1ad6cc485c769f180dbf945671f1d3b3fb09729294579a3ea68",
+    # v1.7: switch-on-ctr build_bctr (jump-table dispatch keyed on the CTR target,
+    # self-healing default) + discovery-trap runtime. Built from rexglue-skate3
+    # @ rexauto-v1.3 (c6aaf51), committed source only (no uncommitted write-watch).
+    "rexglue.exe":    "a09aa49d68340a31b3a4fec825ac622091ce672780ff5dae04bdc7656005eee0",
+    "rexruntime.dll": "c777bfe47c9303ce8d8a7876c25a4aa932495362fe711b29f505514dfaa1cc81",
 }
 
 
