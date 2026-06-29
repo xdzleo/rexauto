@@ -585,14 +585,28 @@ def run_once(ctx, seconds):
 
 def stage_runheal(ctx):
     bat = write_build_bat(ctx)
+    # A short heal window keeps iterations fast, but some titles only reach an
+    # unregistered indirect target (e.g. a vtable method) once they get deeper
+    # into startup/gameplay -- just past the window. Before declaring convergence,
+    # re-run with a longer window so those late fatals aren't missed (this is what
+    # made rayman crash at 0x82162208 ~1s past a 22s window after "converging").
+    confirm_seconds = max(ctx.args.run_seconds * 2, ctx.args.run_seconds + 25)
     for it in range(1, ctx.args.heal_iters + 1):
         txt, alive = run_once(ctx, ctx.args.run_seconds)
         addrs = _heal.invalid_functions_from_text(txt)
         if not addrs:
-            verdict = ("ran %ds with no invalid-function fatal" % ctx.args.run_seconds) if alive \
-                else "exited without an invalid-function fatal (other stop - likely GPU/runtime)"
-            ctx.log("run-heal converged: %s" % verdict)
-            return ctx.mark("runheal", {"iters": it, "alive": alive})
+            ctx.log("  no invalid-function fatal in %ds; confirming with a %ds window"
+                    % (ctx.args.run_seconds, confirm_seconds))
+            ctxt, calive = run_once(ctx, confirm_seconds)
+            caddrs = _heal.invalid_functions_from_text(ctxt)
+            if not caddrs:
+                verdict = ("survived %ds with no invalid-function fatal" % confirm_seconds) if calive \
+                    else "exited without an invalid-function fatal (other stop - likely GPU/runtime)"
+                ctx.log("run-heal converged: %s" % verdict)
+                return ctx.mark("runheal", {"iters": it, "alive": calive,
+                                            "confirmed_seconds": confirm_seconds})
+            ctx.log("  confirmation surfaced %d late fatal(s); continuing heal" % len(caddrs))
+            addrs, txt = caddrs, ctxt
         n = _heal.register_functions(addrs, ctx.functions)
         ctx.log("iter %d: fatal @ %s -> +%d registered; rebuilding"
                 % (it, ",".join("0x%X" % a for a in addrs), n))

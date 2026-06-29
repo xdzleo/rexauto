@@ -1,0 +1,13 @@
+diff --git a/resources/templates/init/app_header.inja b/resources/templates/init/app_header.inja
+index c6bd00c..bb988ec 100644
+--- a/resources/templates/init/app_header.inja
++++ b/resources/templates/init/app_header.inja
+@@ -13,7 +13,7 @@ class {{ names.pascal_case }}App : public rex::ReXApp {
+   static std::unique_ptr<rex::ui::WindowedApp> Create(
+       rex::ui::WindowedAppContext& ctx) {
+     return std::unique_ptr<{{ names.pascal_case }}App>(new {{ names.pascal_case }}App(ctx, "{{ names.snake_case }}",
+-        PPCImageConfig));
++        {{ names.snake_case }}_PPCImageConfig));
+   }
+ 
+   // Override virtual hooks for customization:
