@@ -136,6 +136,7 @@ def run(cmd, **kw):
 
 
 def rexglue(ctx, *xargs, env=None, capture=False):
+    verify_sdk_pin(ctx.env)  # gate SDK use (codegen/init); a pure game run never reaches this
     cmd = [ctx.env["rexglue"]] + list(xargs)
     e = dict(os.environ, **(env or {}))
     if capture:
@@ -550,13 +551,19 @@ def stage_build(ctx):
     raise SystemExit("build did not converge; see %s" % os.path.join(ctx.work, "_build.log"))
 
 
-def run_once(ctx, seconds):
-    """Launch the game, let it run, kill it; return (newest-this-launch log text, alive)."""
+def run_once(ctx, seconds, discover=False):
+    """Launch the game, let it run, kill it; return (newest-this-launch log text, alive).
+    discover=True sets REX_HEAL_DISCOVER so the runtime logs+continues on each
+    unregistered indirect target (surfacing many in one run) instead of aborting."""
     logdir = os.path.join(ctx.builddir, "logs")
     before = set(glob.glob(os.path.join(logdir, "*.log")))
     t0 = time.time()
+    env = None
+    if discover:
+        env = dict(os.environ)
+        env["REX_HEAL_DISCOVER"] = "1"
     try:
-        p = subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir)
+        p = subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir, env=env)
     except OSError as ex:
         ctx.log("  could not launch the game: %s" % ex)
         return "", False
@@ -583,8 +590,49 @@ def run_once(ctx, seconds):
     return _heal._read_text(max(new, key=os.path.getmtime)), alive
 
 
+def _code_range(ctx):
+    """[lo, hi) of the entrypoint module's generated code, for filtering discovered
+    targets down to plausible function addresses."""
+    import re
+    try:
+        h = open(os.path.join(ctx.gen, "default", ctx.name + "_init.h")).read()
+        b = int(re.search(r"REX_CODE_BASE\s+0x([0-9A-Fa-f]+)", h).group(1), 16)
+        s = int(re.search(r"REX_CODE_SIZE\s+0x([0-9A-Fa-f]+)", h).group(1), 16)
+        return b, b + s
+    except Exception:
+        return 0x82000000, 0x84000000
+
+
 def stage_runheal(ctx):
     bat = write_build_bat(ctx)
+    # --- Fast bulk discovery -------------------------------------------------
+    # With REX_HEAL_DISCOVER the runtime logs+continues on each unregistered
+    # indirect target instead of aborting, so ONE run surfaces MANY missing
+    # functions. Register the whole batch and rebuild once; repeat until a run
+    # finds nothing new -- this collapses the O(N) one-at-a-time heal into a few
+    # rebuilds. Targets are filtered to aligned, in-code-range addresses (the
+    # corrupted no-op continuation can surface spurious ones; an extra generated
+    # function is harmless).
+    lo, hi = _code_range(ctx)
+    for r in range(1, 12 + 1):
+        txt, _ = run_once(ctx, ctx.args.run_seconds, discover=True)
+        addrs = [a for a in _heal.invalid_functions_from_text(txt)
+                 if lo <= a < hi and (a & 3) == 0]
+        n = _heal.register_functions(addrs, ctx.functions)
+        ctx.log("discover round %d: %d in-range targets -> +%d new" % (r, len(addrs), n))
+        if n == 0:
+            break
+        do_codegen(ctx)
+        logp, rc = do_build(ctx, bat)
+        if rc != 0 or not os.path.exists(ctx.exe):
+            if "use of undeclared label" in _heal._read_text(logp):
+                _heal.heal_boundaries(logp, ctx.gen, ctx.functions)
+                do_codegen(ctx)
+                do_build(ctx, bat)
+            else:
+                ctx.log("  discovery rebuild failed -> %s; falling back to per-fatal heal" % logp)
+                break
+    # --- Confirm + heal anything discovery missed (FATAL mode) ---------------
     # A short heal window keeps iterations fast, but some titles only reach an
     # unregistered indirect target (e.g. a vtable method) once they get deeper
     # into startup/gameplay -- just past the window. Before declaring convergence,
@@ -644,8 +692,8 @@ def stage_run(ctx):
 # and tested with. Override (advanced, may produce broken builds) by setting
 # REXAUTO_SKIP_SDK_CHECK=1. Bump these when the bundled SDK is updated.
 SDK_PIN = {
-    "rexglue.exe":    "c7145ef3648165c44786acf50ca085478871b9900e71c2945e4eef55155eca63",
-    "rexruntime.dll": "bdc9b414ab8fc92a8ddc266b2076934a974cb8c28b85ba07d691b2fdd950cf8d",
+    "rexglue.exe":    "47304c89e563dfe2ce7c0095bcff45258b8aa77acbae4274c5bb6c7cdf2c81a1",
+    "rexruntime.dll": "0289dcf61d51b1ad6cc485c769f180dbf945671f1d3b3fb09729294579a3ea68",
 }
 
 
@@ -658,8 +706,18 @@ def _sha256(path):
     return h.hexdigest()
 
 
+_sdk_pin_checked = False
+
+
 def verify_sdk_pin(env):
-    """Refuse a mismatched SDK so an incompatible rexglue/runtime can't be used."""
+    """Refuse a mismatched SDK so an incompatible rexglue/runtime can't be used.
+    Called right before any rexglue.exe use (codegen/init) -- a pure game run (the
+    GUI Launch of an already-built title) never reaches it, so launching is never
+    blocked by a pin mismatch; only building/codegen is gated. Checked once."""
+    global _sdk_pin_checked
+    if _sdk_pin_checked:
+        return
+    _sdk_pin_checked = True
     if os.environ.get("REXAUTO_SKIP_SDK_CHECK"):
         print("[rexauto] WARNING: SDK pin check skipped (REXAUTO_SKIP_SDK_CHECK) — "
               "an incompatible SDK may produce broken builds")
@@ -708,7 +766,6 @@ def main():
                bool(env["idat"]), bool(env["vcvars"])))
     if not env["rexglue"]:
         raise SystemExit("rexglue.exe not found (set REXGLUE or build the ReXGlue SDK).")
-    verify_sdk_pin(env)
 
     order = STAGES[:]
     if args.no_jumptables:
