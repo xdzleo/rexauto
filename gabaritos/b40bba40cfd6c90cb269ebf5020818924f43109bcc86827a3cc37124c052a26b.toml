@@ -1,0 +1,18 @@
+# rexauto gabarito — pre-discovered cures for "budokai3" (11)
+[meta]
+name = "budokai3"
+xex_sha256 = "b40bba40cfd6c90cb269ebf5020818924f43109bcc86827a3cc37124c052a26b"
+cures = 11
+
+[functions]
+"0x82097F08" = {}
+"0x8213EA00" = {}
+"0x821EDCE0" = {}
+"0x821EE810" = {}
+"0x821FB170" = {}
+"0x8228D890" = {}
+"0x8228D8B0" = {}
+"0x82292C68" = {}
+"0x82294030" = {}
+"0x82294788" = {}
+"0x82296528" = {}
