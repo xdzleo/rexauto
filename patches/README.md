@@ -9,6 +9,10 @@ prebuilt copy of the SDK; these files document the changes so the build is repro
 The four `sdk-fork-*.patch` files apply on top of that fork. The two older patches at
 the bottom targeted the previous upstream `rexglue/rexglue-sdk` v0.8.0 base.
 
+The exact patched source (fork + all four patches) is also published at
+[xdzleo/rexglue-skate3 @ `rexauto-v1.3`](https://github.com/xdzleo/rexglue-skate3/tree/rexauto-v1.3)
+— clone that branch and build to reproduce the bundled binaries directly.
+
 Apply against an SDK checkout and rebuild:
 
 ```sh
