@@ -6,7 +6,7 @@ prebuilt copy of the SDK; these files document the changes so the build is repro
 **As of v1.3 the bundled SDK is built from the Skate-3 ReXGlue fork**
 ([mchughalex/rexglue-skate3](https://github.com/mchughalex/rexglue-skate3) @
 `skate3-sdk-clean`) — the hardened ReXGlue lineage the shipped community ports run on.
-The three `sdk-fork-*.patch` files apply on top of that fork. The two older patches at
+The four `sdk-fork-*.patch` files apply on top of that fork. The two older patches at
 the bottom targeted the previous upstream `rexglue/rexglue-sdk` v0.8.0 base.
 
 Apply against an SDK checkout and rebuild:
@@ -43,6 +43,15 @@ function on *every* function add; it now consults a `target -> source-function-b
 index (`unresolvedByTarget_`) and touches only the nodes that can actually resolve.
 **Output is byte-identical** (verified by `diff -rq` and by hashing the whole generated
 tree before/after on rayman3hd — same SHA).
+
+### `sdk-fork-game-data-root.patch`
+
+The fork-native version of the double-click fallback below. The fork's `rex_app.cpp`
+resolved `game_data_root` only from the config TOML and the `--game_data_root` cvar and
+aborted with *"--game_data_root was not provided."* otherwise — silently breaking
+double-click launch after the v1.3 migration (rexauto still writes the `game_root.txt`
+sidecar). This restores the v0.8.0 `SetupEnvironment` fallback (sidecar → `game/` folder →
+exe dir, each gated on `default.xex`) onto the fork's restructured path resolution.
 
 ---
 
