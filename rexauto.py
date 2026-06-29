@@ -515,6 +515,142 @@ def write_game_icon(ctx):
         ctx.log("could not generate game icon (%s)" % ex)
 
 
+# ----------------------------------------------------- extra (multi-binary) modules
+# Some titles ship a 2nd recompilable guest module (e.g. Skate 3's EAWebkit.xex at
+# guest 0x88xxxxxx) that the entrypoint calls into. The fork SDK already supports it
+# (per-manifest out_directory_path + symbol_prefix, one dispatcher spanning both
+# ranges); rexauto just orchestrates a 2nd codegen and wires its sources + host
+# registration in. Everything below is a NO-OP for single-module titles
+# (extra_modules() is empty), so those builds are byte-identical.
+def extra_modules(ctx):
+    """[{key, name, xex, symbol_prefix}] of recompilable modules beyond the entrypoint.
+    Opt-in by data on disk: an optional port/<name>_modules.toml, else a narrow built-in
+    for the known skate3/EAWebkit case (only fires when that exact 2nd module is present)."""
+    cfg = os.path.join(ctx.port, "%s_modules.toml" % ctx.name)
+    if os.path.exists(cfg):
+        mods, txt = [], open(cfg, encoding="utf-8", errors="ignore").read()
+        for blk in re.split(r'\[\[\s*modules\s*\]\]', txt)[1:]:
+            g = lambda k: (re.search(k + r'\s*=\s*"([^"]*)"', blk) or [None, None])[1]
+            key, xex = g("key"), g("xex")
+            if key and xex:
+                mods.append({"key": key, "name": g("name") or key,
+                             "xex": os.path.join(ctx.game, xex.replace("/", os.sep)),
+                             "symbol_prefix": g("symbol_prefix") or (key + "_")})
+        return mods
+    ewk = os.path.join(ctx.game, "data", "webkit", "EAWebkit.xex")
+    if os.path.exists(ewk):
+        return [{"key": "eawebkit", "name": "eawebkit", "xex": ewk, "symbol_prefix": "eawebkit_"}]
+    return []
+
+
+def _author_module_manifest(ctx, m):
+    sdkv = "0.8.0.0"
+    try:
+        mm = re.search(r'sdk_version\s*=\s*"([^"]*)"', open(ctx.manifest).read())
+        sdkv = mm.group(1) if mm else sdkv
+    except OSError:
+        pass
+    rel = os.path.relpath(m["xex"], ctx.port).replace("\\", "/")
+    open(os.path.join(ctx.port, "%s_manifest.toml" % m["key"]), "w", encoding="utf-8").write(
+        '# %s -- extra recompiled module of %s, authored by rexauto.\n'
+        '[project]\nname = "%s"\nsdk_version = "%s"\ngame_root = "../game"\n\n'
+        '[entrypoint]\nfile_path = "%s"\nout_directory_path = "generated/%s"\n'
+        'includes = ["%s_functions.toml"]\nsymbol_prefix = "%s"\n'
+        % (m["key"], ctx.name, m["name"], sdkv, rel, m["key"], m["key"], m["symbol_prefix"]))
+
+
+def _seed_module_functions(ctx, m):
+    fns = os.path.join(ctx.port, "%s_functions.toml" % m["key"])
+    if _heal.load_overrides(fns):
+        return
+    seed = os.path.join(HERE, "seeds", "%s_functions.toml" % m["key"])
+    if os.path.exists(seed):
+        shutil.copyfile(seed, fns)
+        ctx.log("  module '%s': seeded cures from rexauto/seeds" % m["key"])
+    else:
+        _heal.write_overrides(fns, {})
+
+
+def _inject_extra_modules_into_cmake(ctx, mods):
+    cml = os.path.join(ctx.port, "CMakeLists.txt")
+    txt = open(cml, encoding="utf-8", errors="ignore").read()
+    if "_rexauto_mod" in txt:   # already injected (manually or by a prior run)
+        return
+    keys = " ".join(m["key"] for m in mods)
+    open(cml, "a", encoding="utf-8").write(
+        "\n# rexauto-extra-modules: extra recompiled modules linked into the same exe.\n"
+        "foreach(_rexauto_mod %s)\n"
+        "    if(EXISTS \"${CMAKE_CURRENT_SOURCE_DIR}/generated/${_rexauto_mod}/sources.cmake\")\n"
+        "        set(_rexauto_saved \"${GENERATED_SOURCES}\")\n"
+        "        include(generated/${_rexauto_mod}/sources.cmake)\n"
+        "        target_sources(%s PRIVATE ${GENERATED_SOURCES})\n"
+        "        target_include_directories(%s PRIVATE\n"
+        "            \"${CMAKE_CURRENT_SOURCE_DIR}/generated/${_rexauto_mod}\")\n"
+        "        set(GENERATED_SOURCES \"${_rexauto_saved}\")\n"
+        "        unset(_rexauto_saved)\n"
+        "    endif()\nendforeach()\n" % (keys, ctx.name, ctx.name))
+    ctx.log("  wired %d extra module(s) into CMakeLists" % len(mods))
+
+
+def _inject_extra_modules_into_app(ctx, mods):
+    app = os.path.join(ctx.port, "src", "%s_app.h" % ctx.name)
+    if not os.path.exists(app):
+        return
+    txt = open(app, encoding="utf-8", errors="ignore").read()
+    if "rexauto: 2nd-module" in txt:
+        return
+    externs = "\n".join('extern const rex::PPCImageInfo %sPPCImageConfig;' % m["symbol_prefix"]
+                        for m in mods)
+    cfgs = ", ".join('&%sPPCImageConfig' % m["symbol_prefix"] for m in mods)
+    inc = "#include <rex/rex_app.h>"
+    txt = txt.replace(inc,
+        inc + "\n#include <rex/system/function_dispatcher.h>  // rexauto: 2nd-module\n\n"
+        "// rexauto: extra recompiled module(s) linked into this exe.\n" + externs, 1)
+    hook = (
+        "\n  // rexauto: register the extra module function tables once the\n"
+        "  // entrypoint's exists, so guest calls into them resolve.\n"
+        "  void OnPostSetup() override {\n"
+        "    auto* dispatcher = runtime()->function_dispatcher();\n"
+        "    if (!dispatcher) return;\n"
+        "    for (const rex::PPCImageInfo* _cfg : { %s }) {\n"
+        "      if (!_cfg->func_mappings) continue;\n"
+        "      if (!dispatcher->InitializeFunctionTable(_cfg->code_base, _cfg->code_size,\n"
+        "                                               _cfg->image_base, _cfg->image_size))\n"
+        "        continue;\n"
+        "      for (int i = 0; _cfg->func_mappings[i].guest != 0; ++i)\n"
+        "        if (_cfg->func_mappings[i].host)\n"
+        "          dispatcher->SetFunction(\n"
+        "              static_cast<uint32_t>(_cfg->func_mappings[i].guest),\n"
+        "              _cfg->func_mappings[i].host);\n"
+        "    }\n  }\n" % cfgs)
+    idx = txt.rstrip().rfind("};")
+    txt = txt[:idx] + hook + txt[idx:]
+    open(app, "w", encoding="utf-8").write(txt)
+    ctx.log("  wired %d extra module(s) host registration into %s_app.h" % (len(mods), ctx.name))
+
+
+def setup_extra_modules(ctx):
+    """Codegen + wire every extra recompiled module. No-op for single-module titles."""
+    mods = extra_modules(ctx)
+    if not mods:
+        return
+    for m in mods:
+        _author_module_manifest(ctx, m)
+        _seed_module_functions(ctx, m)
+        man = os.path.join(ctx.port, "%s_manifest.toml" % m["key"])
+        r = rexglue(ctx, "--log-level", "error", "codegen", man, capture=True)
+        ok = os.path.exists(os.path.join(ctx.port, "generated", m["key"], "sources.cmake"))
+        if r.returncode != 0 or not ok:
+            out = (r.stdout or "") + (r.stderr or "")
+            raise SystemExit("[rexauto] extra module '%s' codegen failed:\n%s"
+                             % (m["key"], "\n".join(out.splitlines()[-10:])))
+        ctx.log("  module '%s': codegen OK -> generated/%s" % (m["key"], m["key"]))
+    # extra-module codegen rewrites generated/rexglue.cmake to point at the last extra;
+    # the entrypoint codegen in the build loop runs AFTER this and restores it to default.
+    _inject_extra_modules_into_cmake(ctx, mods)
+    _inject_extra_modules_into_app(ctx, mods)
+
+
 def stage_build(ctx):
     miss = [k for k in ("vcvars", "clang", "clangxx", "sdk") if not ctx.env[k]]
     if miss:
@@ -523,6 +659,7 @@ def stage_build(ctx):
     bat = write_build_bat(ctx)
     if not _heal.load_overrides(ctx.functions):  # fresh project -> seed from the shared gabarito
         fetch_gabarito(ctx)
+    setup_extra_modules(ctx)   # codegen + wire any extra recompiled modules (no-op if none)
     last_ends = None
     for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
         ctx.log("codegen + build (attempt %d/%d)" % (attempt, MAX_BUILD_ATTEMPTS))
