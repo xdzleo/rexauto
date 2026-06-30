@@ -1,19 +1,18 @@
 # skate3 — porte jogável (rexauto)
 
-"Rodar rexauto no skate3 -> jogável" (TU 3.0.3.0, gameplay context reached, 0 FATAL,
-zero-regressão nos outros jogos). Snapshot dos arquivos hand-crafted do port
-(autoports/skate3/port). generated/ e out/ são regeneráveis (não incluídos).
+"Rodar rexauto no skate3 -> jogável" (TU 3.0.3.0, "gameplay context reached", 0 FATAL,
+zero-regressão nos outros jogos). Snapshot dos arquivos hand-crafted; generated/ + out/
+regeneram (não incluídos).
 
-## A cura que faz jogar
-- **src/skate3_exception_compat.cpp** — override do exception-guard da CRT do TU
-  (sub_82F6FAA0) forçando r3=0. Sem isso: vtable null -> call 0x0 @lr=0x8291C138 ~16s.
-  O guard se MOVE com o TU (retail 0x82F44E40 -> TU 0x82F6FAA0); o rexauto setou
-  setjmp_address=0x82F44E40 (mis-ID do exception-guard como setjmp) no manifest.
-- **skate3_functions.toml** — inclui os 10 chunks da jump-table de 0x8294AF70
-  (0x8294B2C4..0x8294B4A0, parent=0x8294AF70) que faltavam.
-- **src/** app completo portado da comunidade (mchughalex/skate3recomp): Skate3BaseApp
-  + helpers (fov, user_settings, iso_installer, ultrawide).
+## A cura — agora GENERALIZADA no pipeline (melhor que o hand-code deles)
+- Exception-guard do TU: stage_setjmp detecta o guard na imagem PATCHEADA e grava
+  setjmp_address=0x82F6FAA0 no manifest -> codegen emite ppc_setjmp nos call-sites
+  (retorna 0 na chamada direta = "sem exceção", r3=0). NÃO precisa mais de C++ por
+  jogo. src/skate3_exception_compat.cpp fica como referência mas NÃO é linkado.
+- skate3_functions.toml: inclui os 10 chunks da jump-table de 0x8294AF70.
+- src/: app completo portado da comunidade (mchughalex/skate3recomp).
 
-## TODO generalizar no pipeline
-A auto-detecção de setjmp do rexauto confunde o exception-guard da CRT com setjmp e
-nao reajusta o endereco quando um TU e aplicado. Corrigir beneficia todo jogo com TU.
+## Fix de pipeline (beneficia a frota com TU)
+Causa do mis-setjmp = dump de imagem stale (escaneava a base, não a TU). stage_setjmp
+agora força dump fresco -> escaneia a imagem que o codegen recompila. No-op pra jogos
+sem TU (codegen byte-idêntico).

@@ -6,8 +6,8 @@ sdk_version = "0.8.0.0"
 game_root = "../game"
 
 [entrypoint]
-setjmp_address = 0x82F44E40
-longjmp_address = 0x82F25260
+setjmp_address = 0x82F6FAA0
+longjmp_address = 0x82F4FEB0
 file_path = "../game/default.xex"
 out_directory_path = "generated/default"
 includes = ["skate3_functions.toml", "skate3_switch_tables.toml"]

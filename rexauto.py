@@ -245,7 +245,29 @@ def stage_setjmp(ctx):
         ctx.log("detect_setjmp unavailable -> skipping setjmp/longjmp detection (%s)" % ex)
         return ctx.mark("setjmp", {"skipped": "no-module"})
     image = os.path.join(ctx.work, "%s_image.bin" % ctx.name)
-    ctx.log("scanning image for setjmp/longjmp (C++ exception support)")
+    # Force a FRESH dump. The guard we must scan is the one codegen actually
+    # recompiles, and when a title update is staged (ctx.tu_xexp) rexglue's loader
+    # auto-applies the co-located default.xexp delta IN MEMORY at codegen time
+    # (cvar xex_apply_patches; user_module.cpp ApplyPatch) -- so the image codegen
+    # dumps here is the PATCHED (TU) image, whose setjmp/longjmp guard differs from
+    # the base. A stale skate3_image.bin left over from an EARLIER run that predates
+    # the .xexp staging would be the un-patched BASE image; scanning it writes the
+    # retail guard address, which doesn't even exist in the TU generated set, so
+    # ppc_setjmp lands at a no-op site and the title needs hand-fixing. Delete any
+    # leftover first so a pre-TU image can never be reused, and so the no-dump guard
+    # below can't silently pass on a stale file when codegen fails to re-dump.
+    # NO-OP for non-TU titles: ctx.tu_xexp is None -> codegen loads only the base
+    # xex -> the re-dumped image is byte-identical to before, and codegen OUTPUT is
+    # untouched (this only deletes/rewrites a throwaway analysis dump).
+    try:
+        if os.path.exists(image):
+            os.remove(image)
+    except OSError as ex:
+        ctx.log("could not remove stale image dump %s (%s) -- continuing; "
+                "codegen truncates+overwrites it anyway" % (image, ex))
+    tu = getattr(ctx, "tu_xexp", None)
+    ctx.log("scanning %s image for setjmp/longjmp (C++ exception support)"
+            % ("PATCHED (title-update) " if tu else ""))
     try:
         blob = do_codegen(ctx, env={"REX_DUMP_IMAGE": image}, level="trace")
     except SystemExit as ex:
@@ -276,8 +298,10 @@ def stage_setjmp(ctx):
         ctx.log("longjmp 0x%X found but setjmp ambiguous (%s) -> need both; skipping write" % (lj, res))
         return ctx.mark("setjmp", {"longjmp": "0x%X" % lj, "setjmp": "ambiguous"})
     _dj.write_addresses(ctx.manifest, longjmp=lj, setjmp=sj)
-    ctx.log("setjmp/longjmp detected -> setjmp=0x%X longjmp=0x%X (written to manifest)" % (sj, lj))
-    ctx.mark("setjmp", {"setjmp": "0x%X" % sj, "longjmp": "0x%X" % lj})
+    ctx.log("setjmp/longjmp detected on %s image -> setjmp=0x%X longjmp=0x%X (written to manifest)"
+            % ("PATCHED" if tu else "base", sj, lj))
+    ctx.mark("setjmp", {"setjmp": "0x%X" % sj, "longjmp": "0x%X" % lj,
+                        "image": "patched" if tu else "base"})
 
 
 def stage_jumptables(ctx):

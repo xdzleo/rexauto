@@ -43,6 +43,10 @@ BASELINES = os.path.join(HERE, "baselines")
 HEAVY = {"skate3"}                 # run last / alone-ish (huge image)
 MAX_PARALLEL = 4
 RUNTIME_SECONDS = int(os.environ.get("REXGATE_RUN_SECONDS", "30"))
+# HEAVY titles reach their gameplay marker late (skate3's fires ~40s in), so a short
+# run scores a spurious tier 2. Give HEAVY titles a longer floor so the marker is
+# reliably captured and the run stays alive past it -> deterministic tier 3.
+HEAVY_RUNTIME_SECONDS = int(os.environ.get("REXGATE_RUN_SECONDS_HEAVY", "90"))
 # Per-title "reached interactive/gameplay" log marker -> health_tier 3 when seen.
 MARKERS = {"skate3": "gameplay context reached"}
 
@@ -332,7 +336,7 @@ def main():
                 print("  %-32s %-13s %s" % (n, "RT-SKIP",
                       "codegen verdict %s -- not launched" % results.get(n)))
                 continue
-            nm, verdict, detail = run_one_runtime(n, p, bless, RUNTIME_SECONDS)
+            nm, verdict, detail = run_one_runtime(n, p, bless, HEAVY_RUNTIME_SECONDS if n in HEAVY else RUNTIME_SECONDS)
             print("  %-32s %-13s %s" % (nm, verdict, detail))
             if verdict == "REGRESSION":
                 rt_bad.append(nm)

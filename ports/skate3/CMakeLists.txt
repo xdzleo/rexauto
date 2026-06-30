@@ -13,19 +13,23 @@ include(generated/rexglue.cmake)
 # Sources
 #
 # rexauto full-port: adopt the proven community Skate3BaseApp app sources
-# (mirrors the community CMakeLists' SKATE3_COMMON_SOURCES) so the retail boot
-# path matches the PROVEN-playable configuration. TU-only sources
-# (skate3_title_update_installer.cpp) and exception_compat.cpp are intentionally
-# omitted: this is the retail (non-TU) build (SKATE3_HAS_TITLE_UPDATE=0) and the
-# retail exception-guard symbol sub_82F44E40 is not present in this port's
-# generated set, so exception_compat.cpp would not link.
+# (mirrors the community CMakeLists' SKATE3_COMMON_SOURCES) so the boot path
+# matches the PROVEN-playable configuration.
+#
+# The structured-exception guard is now handled generically by the pipeline: the
+# setjmp stage detects the guard on the PATCHED (title-update) image and records
+# its TU address (setjmp_address=0x82F6FAA0) in the manifest, so codegen emits
+# ppc_setjmp at the guard call sites. Native ppc_setjmp returns 0 on the direct
+# call -- the exact "no exception occurred" (r3=0) result the hand-coded
+# skate3_exception_compat.cpp used to force -- so that per-game override is no
+# longer needed and is intentionally omitted here. (skate3_title_update_installer.cpp
+# stays omitted too: the game data is already installed, SKATE3_HAS_TITLE_UPDATE=0.)
 set(SKATE3_SOURCES
     src/main.cpp
     src/skate3_app_common.cpp
     src/skate3_fov.cpp
     src/skate3_iso_installer.cpp
     src/skate3_user_settings.cpp
-    src/skate3_exception_compat.cpp
 )
 
 if(WIN32)
