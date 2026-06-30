@@ -108,7 +108,10 @@ def write_overrides_full(toml_path, ov):
     if os.path.exists(toml_path):
         mm = re.search(r'(\[meta\].*?)\n\[functions\]', _read_text(toml_path), re.S)
         if mm:
-            meta = mm.group(1).rstrip() + "\n\n"
+            # _read_text reads binary, so a CRLF source file keeps its \r here; the
+            # text-mode write below would then turn each \r\n into \r\r\n and break the
+            # TOML parse. Normalise the carried-over [meta] block to \n first.
+            meta = mm.group(1).rstrip().replace("\r\n", "\n").replace("\r", "\n") + "\n\n"
     header = ("# Boundary/function overrides auto-healed by rexauto.\n"
               "# `end` = extend a function the recompiler split mid-flow;\n"
               "# `parent` = a chunk (address-taken sub-entry) of a parent function;\n"
