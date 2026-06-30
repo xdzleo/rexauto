@@ -588,6 +588,138 @@ def extra_modules(ctx):
     return []
 
 
+# ----------------------------------------------------- per-title app-glue (factory)
+# Beyond the 2nd-module dispatch above, some titles need a little host glue wired
+# into the generated app's OnPostSetup(): a signed-in user identity, content-scheme
+# symbolic links (e.g. big:/dlcbig:), and a BIG-directory probe overlay. This is the
+# mechanical, per-title-but-data-driven layer: the MECHANISM is generic (SDK
+# RegisterSymbolicLink / HostPathDevice / SetIdentity) but the values are per-title,
+# so they live in an opt-in port/<name>_appglue.toml consumed here. Everything below
+# is a strict NO-OP when that file is absent: glue_records() returns {} and the
+# injector is never called, so app.h stays byte-identical for every existing title.
+def glue_records(ctx):
+    """Parse the optional port/<name>_appglue.toml into a dict, or {} if absent.
+
+    Mirrors extra_modules()' lightweight regex/toml parsing (same style as the
+    <name>_modules.toml reader). Recognized sections:
+      [identity]            xuid, name
+      [[alias]]             scheme, target           (one per entry)
+      [overlay]             enabled, scan_root, scan_prefix, device_scheme,
+                            overlay_subdir, fixed_dirs[], [[overlay.link]] guest/target
+      [dlc]                 auto_install, root
+      [title_update]        container, url, [[title_update.payload]] src/dest/sha256/size
+    Returns {} when the file does not exist."""
+    cfg = os.path.join(ctx.port, "%s_appglue.toml" % ctx.name)
+    if not os.path.exists(cfg):
+        return {}
+    txt = open(cfg, encoding="utf-8", errors="ignore").read()
+
+    def _strip_comments(s):
+        # drop full-line and trailing '#' comments (none of our values contain '#')
+        out = []
+        for ln in s.splitlines():
+            h = ln.find("#")
+            out.append(ln if h < 0 else ln[:h])
+        return "\n".join(out)
+
+    txt = _strip_comments(txt)
+
+    def _sect(name):
+        # body of a single [name] table up to the next top-level/array header
+        m = re.search(r'(?m)^\s*\[%s\]\s*$' % re.escape(name), txt)
+        if not m:
+            return None
+        rest = txt[m.end():]
+        nxt = re.search(r'(?m)^\s*\[', rest)
+        return rest[:nxt.start()] if nxt else rest
+
+    def _arrays(name):
+        # bodies of every [[name]] array-of-tables entry
+        out = []
+        for m in re.finditer(r'(?m)^\s*\[\[\s*%s\s*\]\]\s*$' % re.escape(name), txt):
+            rest = txt[m.end():]
+            nxt = re.search(r'(?m)^\s*\[', rest)
+            out.append(rest[:nxt.start()] if nxt else rest)
+        return out
+
+    def _unescape(raw):
+        # decode the TOML basic-string escapes we care about so the dict holds the
+        # true string (e.g. "\\Device" -> "\Device"); _cpp_str re-escapes for C++.
+        return re.sub(r'\\(.)', lambda mo: {
+            "n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}.get(mo.group(1),
+            mo.group(1)), raw)
+
+    def _s(blk, k):
+        m = re.search(k + r'\s*=\s*"((?:[^"\\]|\\.)*)"', blk)
+        return _unescape(m.group(1)) if m else None
+
+    def _b(blk, k):
+        m = re.search(k + r'\s*=\s*(true|false)', blk)
+        return (m.group(1) == "true") if m else None
+
+    def _i(blk, k):
+        m = re.search(k + r'\s*=\s*(-?\d+)', blk)
+        return int(m.group(1)) if m else None
+
+    def _list(blk, k):
+        m = re.search(k + r'\s*=\s*\[(.*?)\]', blk, re.S)
+        if not m:
+            return []
+        return [_unescape(v.group(1)) for v in re.finditer(r'"((?:[^"\\]|\\.)*)"', m.group(1))]
+
+    glue = {}
+
+    ident = _sect("identity")
+    if ident is not None:
+        xuid = _s(ident, "xuid")
+        if xuid:
+            glue["identity"] = {"xuid": xuid, "name": _s(ident, "name") or "Player"}
+
+    aliases = []
+    for blk in _arrays("alias"):
+        scheme, target = _s(blk, "scheme"), _s(blk, "target")
+        if scheme and target:
+            aliases.append({"scheme": scheme, "target": target})
+    if aliases:
+        glue["aliases"] = aliases
+
+    ov = _sect("overlay")
+    if ov is not None and _b(ov, "enabled"):
+        links = []
+        for blk in _arrays("overlay.link"):
+            guest, target = _s(blk, "guest"), _s(blk, "target")
+            if guest and target:
+                links.append({"guest": guest, "target": target})
+        glue["overlay"] = {
+            "scan_root": _s(ov, "scan_root"),
+            "scan_prefix": _s(ov, "scan_prefix"),
+            "device_scheme": _s(ov, "device_scheme"),
+            "overlay_subdir": _s(ov, "overlay_subdir"),
+            "fixed_dirs": _list(ov, "fixed_dirs"),
+            "links": links,
+        }
+
+    dlc = _sect("dlc")
+    if dlc is not None and _b(dlc, "auto_install"):
+        glue["dlc"] = {"auto_install": True, "root": _s(dlc, "root") or "dlc"}
+
+    tu = _sect("title_update")
+    if tu is not None:
+        payloads = []
+        for blk in _arrays("title_update.payload"):
+            src, dest = _s(blk, "src"), _s(blk, "dest")
+            if src and dest:
+                payloads.append({"src": src, "dest": dest,
+                                 "sha256": _s(blk, "sha256") or "",
+                                 "size": _i(blk, "size") or 0})
+        container, url = _s(tu, "container"), _s(tu, "url")
+        if payloads or container or url:
+            glue["title_update"] = {"container": container or "", "url": url or "",
+                                    "payloads": payloads}
+
+    return glue
+
+
 def _author_module_manifest(ctx, m):
     sdkv = "0.8.0.0"
     try:
@@ -637,47 +769,186 @@ def _inject_extra_modules_into_cmake(ctx, mods):
     ctx.log("  wired %d extra module(s) into CMakeLists" % len(mods))
 
 
-def _inject_extra_modules_into_app(ctx, mods):
+def _cpp_str(s):
+    """Escape a Python str (already toml-decoded, so it holds literal backslashes)
+    for embedding in a C++ double-quoted string literal."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _appglue_body(ctx, glue):
+    """Render the per-section OnPostSetup lines for the appglue.toml sections that
+    are present. Returns ('', set()) when glue is empty so nothing is appended and
+    no includes are added. Each section emits nothing when absent."""
+    lines, includes = [], set()
+
+    ident = glue.get("identity")
+    if ident:
+        includes.add("rex/system/xam/user_profile.h")
+        lines += [
+            "    // rexauto: appglue identity -- sign in a stub user so per-user vtable",
+            "    // slots are constructed (else a worker thread calls through guest 0x0).",
+            "    if (auto* _kernel = runtime()->kernel_state())",
+            "      if (auto* _profile = _kernel->user_profile())",
+            '        _profile->SetIdentity(%sULL, "%s");'
+            % (ident["xuid"], _cpp_str(ident["name"])),
+        ]
+
+    aliases = glue.get("aliases")
+    if aliases:
+        includes.add("rex/filesystem/vfs.h")
+        lines.append("    // rexauto: appglue aliases -- content-scheme symbolic links.")
+        lines.append("    if (auto* _fs = runtime()->file_system()) {")
+        for a in aliases:
+            lines.append('      _fs->RegisterSymbolicLink("%s", "%s");'
+                         % (_cpp_str(a["scheme"]), _cpp_str(a["target"])))
+        lines.append("    }")
+
+    ov = glue.get("overlay")
+    if ov:
+        includes.add("rex/filesystem/vfs.h")
+        includes.add("rex/filesystem/host_path_device.h")
+        scheme = ov.get("device_scheme") or "overlay:"
+        subdir = ov.get("overlay_subdir") or "vfs_overlay"
+        dirs = list(ov.get("fixed_dirs") or [])
+        lines += [
+            "    // rexauto: appglue overlay -- pre-create the BIG-directory probe",
+            "    // dirs the title checks for existence, then mount them as a host",
+            "    // device and fan out the guest probe paths to it.",
+            "    {",
+            '      auto _overlay_root = cache_root() / "%s";' % _cpp_str(subdir),
+            "      std::error_code _ec;",
+        ]
+        for d in dirs:
+            lines.append('      std::filesystem::create_directories(_overlay_root / "%s", _ec);'
+                         % _cpp_str(d))
+        lines += [
+            "      auto _overlay_dev ="
+            ' std::make_unique<rex::filesystem::HostPathDevice>("%s", _overlay_root);'
+            % _cpp_str(scheme),
+            "      _overlay_dev->Initialize();",
+            "      if (auto* _fs = runtime()->file_system()) {",
+            "        _fs->RegisterDevice(std::move(_overlay_dev));",
+        ]
+        for ln in (ov.get("links") or []):
+            lines.append('        _fs->RegisterSymbolicLink("%s", "%s");'
+                         % (_cpp_str(ln["guest"]), _cpp_str(ln["target"])))
+        lines += ["      }", "    }"]
+        if dirs or ov.get("links"):
+            includes.add("<filesystem>")
+
+    dlc = glue.get("dlc")
+    if dlc:
+        lines += [
+            "    // rexauto: appglue dlc -- marketplace DLC auto-install. TODO: wire to",
+            "    // an SDK InstallMarketplaceDlc(root) helper once it exists; root=%r."
+            % dlc.get("root"),
+        ]
+
+    tu = glue.get("title_update")
+    if tu:
+        lines += [
+            "    // rexauto: appglue title_update -- TODO: stage TU payloads via an SDK",
+            "    // StageTitleUpdate(container, url, payloads) helper once it exists",
+            "    // (%d payload(s); per-title manifest from %s_appglue.toml)."
+            % (len(tu.get("payloads") or []), ctx.name),
+        ]
+
+    if not lines:
+        return "", set()
+    body = ("\n    // ---- rexauto: appglue (per-title host glue from %s_appglue.toml) ----\n"
+            % ctx.name) + "\n".join(lines) + "\n"
+    return body, includes
+
+
+def _inject_app_glue(ctx, mods, glue):
+    """Patch src/<name>_app.h: keep the existing extra-module extern/dispatcher
+    block verbatim, and append the per-title appglue sections into the SAME
+    generated OnPostSetup() body. Idempotent and a strict no-op when both mods and
+    glue are empty (caller guards that, but this stays safe regardless)."""
     app = os.path.join(ctx.port, "src", "%s_app.h" % ctx.name)
     if not os.path.exists(app):
         return
     txt = open(app, encoding="utf-8", errors="ignore").read()
-    if "rexauto: 2nd-module" in txt:
-        return
-    externs = "\n".join('extern const rex::PPCImageInfo %sPPCImageConfig;' % m["symbol_prefix"]
-                        for m in mods)
-    cfgs = ", ".join('&%sPPCImageConfig' % m["symbol_prefix"] for m in mods)
+    has_mods = "rexauto: 2nd-module" in txt
+    has_glue = "rexauto: appglue" in txt
+    if (has_mods or not mods) and (has_glue or not glue):
+        return  # nothing new to inject
+
+    glue_body, glue_includes = _appglue_body(ctx, glue) if glue else ("", set())
     inc = "#include <rex/rex_app.h>"
-    txt = txt.replace(inc,
-        inc + "\n#include <rex/system/function_dispatcher.h>  // rexauto: 2nd-module\n\n"
-        "// rexauto: extra recompiled module(s) linked into this exe.\n" + externs, 1)
-    hook = (
-        "\n  // rexauto: register the extra module function tables once the\n"
-        "  // entrypoint's exists, so guest calls into them resolve.\n"
-        "  void OnPostSetup() override {\n"
-        "    auto* dispatcher = runtime()->function_dispatcher();\n"
-        "    if (!dispatcher) return;\n"
-        "    for (const rex::PPCImageInfo* _cfg : { %s }) {\n"
-        "      if (!_cfg->func_mappings) continue;\n"
-        "      if (!dispatcher->InitializeFunctionTable(_cfg->code_base, _cfg->code_size,\n"
-        "                                               _cfg->image_base, _cfg->image_size))\n"
-        "        continue;\n"
-        "      for (int i = 0; _cfg->func_mappings[i].guest != 0; ++i)\n"
-        "        if (_cfg->func_mappings[i].host)\n"
-        "          dispatcher->SetFunction(\n"
-        "              static_cast<uint32_t>(_cfg->func_mappings[i].guest),\n"
-        "              _cfg->func_mappings[i].host);\n"
-        "    }\n  }\n" % cfgs)
-    idx = txt.rstrip().rfind("};")
-    txt = txt[:idx] + hook + txt[idx:]
+
+    # ---- includes after the rex_app.h line (only for what's actually emitted) ----
+    if not has_mods and mods:
+        externs = "\n".join('extern const rex::PPCImageInfo %sPPCImageConfig;' % m["symbol_prefix"]
+                            for m in mods)
+        txt = txt.replace(inc,
+            inc + "\n#include <rex/system/function_dispatcher.h>  // rexauto: 2nd-module\n\n"
+            "// rexauto: extra recompiled module(s) linked into this exe.\n" + externs, 1)
+    if not has_glue and glue_includes:
+        addl = "".join(
+            ("\n#include %s  // rexauto: appglue" % h) if h.startswith("<")
+            else ("\n#include <%s>  // rexauto: appglue" % h)
+            for h in sorted(glue_includes))
+        txt = txt.replace(inc, inc + addl, 1)
+
+    # ---- the OnPostSetup() body: dispatcher block (if any) + appglue block ----
+    if has_mods:
+        # extra-module hook already present; append glue inside the same body, right
+        # before its closing brace (the dispatcher loop's "}\n  }\n").
+        if glue_body:
+            anchor = "    }\n  }\n"      # end of the dispatcher for-loop + method
+            pos = txt.rfind(anchor)
+            if pos < 0:                  # hand-folded body; fall back to method end
+                pos = txt.rfind("  }\n")
+                insert_at = pos
+            else:
+                insert_at = pos + len("    }\n")
+            txt = txt[:insert_at] + glue_body + txt[insert_at:]
+    else:
+        cfgs = ", ".join('&%sPPCImageConfig' % m["symbol_prefix"] for m in mods)
+        hook_open = (
+            "\n  // rexauto: register the extra module function tables once the\n"
+            "  // entrypoint's exists, so guest calls into them resolve.\n"
+            "  void OnPostSetup() override {\n")
+        hook_dispatch = (
+            "    auto* dispatcher = runtime()->function_dispatcher();\n"
+            "    if (!dispatcher) return;\n"
+            "    for (const rex::PPCImageInfo* _cfg : { %s }) {\n"
+            "      if (!_cfg->func_mappings) continue;\n"
+            "      if (!dispatcher->InitializeFunctionTable(_cfg->code_base, _cfg->code_size,\n"
+            "                                               _cfg->image_base, _cfg->image_size))\n"
+            "        continue;\n"
+            "      for (int i = 0; _cfg->func_mappings[i].guest != 0; ++i)\n"
+            "        if (_cfg->func_mappings[i].host)\n"
+            "          dispatcher->SetFunction(\n"
+            "              static_cast<uint32_t>(_cfg->func_mappings[i].guest),\n"
+            "              _cfg->func_mappings[i].host);\n"
+            "    }\n" % cfgs) if mods else ""
+        if not mods:
+            # appglue only: open the hook with a distinct marker comment.
+            hook_open = (
+                "\n  // rexauto: appglue -- per-title host glue (identity / aliases /\n"
+                "  // overlay) from %s_appglue.toml, wired into OnPostSetup.\n"
+                "  void OnPostSetup() override {\n" % ctx.name)
+        hook = hook_open + hook_dispatch + glue_body + "  }\n"
+        idx = txt.rstrip().rfind("};")
+        txt = txt[:idx] + hook + txt[idx:]
+
     open(app, "w", encoding="utf-8").write(txt)
-    ctx.log("  wired %d extra module(s) host registration into %s_app.h" % (len(mods), ctx.name))
+    what = []
+    if mods:
+        what.append("%d extra module(s)" % len(mods))
+    if glue:
+        what.append("appglue [%s]" % ", ".join(sorted(glue.keys())))
+    ctx.log("  wired %s into %s_app.h" % (" + ".join(what), ctx.name))
 
 
 def setup_extra_modules(ctx):
-    """Codegen + wire every extra recompiled module. No-op for single-module titles."""
+    """Codegen + wire every extra recompiled module, plus per-title app glue.
+    No-op for single-module titles with no appglue.toml (early return below)."""
     mods = extra_modules(ctx)
-    if not mods:
+    glue = glue_records(ctx)
+    if not mods and not glue:
         return
     for m in mods:
         _author_module_manifest(ctx, m)
@@ -692,8 +963,9 @@ def setup_extra_modules(ctx):
         ctx.log("  module '%s': codegen OK -> generated/%s" % (m["key"], m["key"]))
     # extra-module codegen rewrites generated/rexglue.cmake to point at the last extra;
     # the entrypoint codegen in the build loop runs AFTER this and restores it to default.
-    _inject_extra_modules_into_cmake(ctx, mods)
-    _inject_extra_modules_into_app(ctx, mods)
+    if mods:
+        _inject_extra_modules_into_cmake(ctx, mods)
+    _inject_app_glue(ctx, mods, glue)
 
 
 def stage_build(ctx):
