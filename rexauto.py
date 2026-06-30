@@ -867,11 +867,16 @@ def stage_run(ctx):
 # and tested with. Override (advanced, may produce broken builds) by setting
 # REXAUTO_SKIP_SDK_CHECK=1. Bump these when the bundled SDK is updated.
 SDK_PIN = {
-    # v1.7: switch-on-ctr build_bctr (jump-table dispatch keyed on the CTR target,
-    # self-healing default) + discovery-trap runtime. Built from rexglue-skate3
-    # @ rexauto-v1.3 (c6aaf51), committed source only (no uncommitted write-watch).
-    "rexglue.exe":    "a09aa49d68340a31b3a4fec825ac622091ce672780ff5dae04bdc7656005eee0",
-    "rexruntime.dll": "c777bfe47c9303ce8d8a7876c25a4aa932495362fe711b29f505514dfaa1cc81",
+    # v1.9: vtable mid-function landing discovery restored. phase_discover.cpp now
+    # addFunction()s a vtable slot that lands inside a parent (no registerChunk, so
+    # the parent's bctr lowering stays byte-identical -> Budokai3-safe), instead of
+    # dropping it. Restores clean-SDK coverage: indirect/virtual call targets (e.g.
+    # skate3 0x82B30790) are statically discovered instead of runtime-healed.
+    # Keeps v1.7's switch-on-ctr build_bctr + discovery-trap. Runtime also carries
+    # caller-lr in the invalid-call FATAL + GPU command-ring memory fixes (battle-freeze).
+    # SDK commits 8b84c2d (codegen) + 3b0d7cc (runtime); gate 9/9 byte-identical.
+    "rexglue.exe":    "3e33bf857b38401c4e202caaaa775fe242f27c72ff36d6db8757299f1262033c",
+    "rexruntime.dll": "40d30ba5d1d6873259703f22c625fa999d394e93f240e16bf28c098c16dfd5a0",
 }
 
 
