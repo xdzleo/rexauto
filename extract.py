@@ -267,8 +267,10 @@ def _xex_opt_value(path, want_id):
 
 
 def _xex_version_tuple(v):
-    """Decode a xex2_version be32 (major:4, minor:4, build:16, qfe:8)."""
-    return ((v >> 28) & 0xF, (v >> 24) & 0xF, (v >> 8) & 0xFFFF, v & 0xFF)
+    """Decode a xex2_version word: major:4, minor:4, build:16, qfe:8 packed from the
+    low bits up. Verified against the real Skate 3 TU3: source 0x3 -> 3.0.0.0,
+    target 0x303 -> 3.0.3.0."""
+    return (v & 0xF, (v >> 4) & 0xF, (v >> 8) & 0xFFFF, (v >> 24) & 0xFF)
 
 
 def xex_version_str(v):
