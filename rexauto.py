@@ -115,6 +115,10 @@ class Ctx:
         ex = self.load_state().get("extract") or {}
         self.game = ex.get("game_dir") or self._game_out
         self.xex = ex.get("xex")
+        # auto-title-update state (all None for a base-only game -> no behaviour change)
+        self.base_xex = ex.get("base_xex")      # original base xex, when a TU was applied
+        self.tu_xexp = ex.get("tu_xexp")        # the title-update delta patch (default.xexp)
+        self.tu_patched = ex.get("tu_patched")  # the pre-patched full xex codegen recompiles
 
     def log(self, msg):
         print("[rexauto] %s" % msg, flush=True)
@@ -160,10 +164,53 @@ def add_includes(ctx, names):
 
 
 # ------------------------------------------------------------------------ stages
+def produce_patched_xex(ctx, base_xex, tu_xexp):
+    """Apply a TU delta (.xexp) to the base xex, producing the full patched xex
+    codegen needs (rexglue codegen consumes a pre-patched full XEX, not a delta).
+    Drives the `rexglue patch` verb. Returns the patched xex path, or None to fall
+    back to the base build -- a missing/failed patcher never breaks a working base
+    build, it just recompiles the base version instead."""
+    out = os.path.join(ctx.port, "%s_patched_default.xex" % ctx.name)
+    os.makedirs(ctx.port, exist_ok=True)
+    try:
+        if os.path.exists(out):
+            os.remove(out)
+        r = rexglue(ctx, "patch", "--base", base_xex, "--xexp", tu_xexp,
+                    "--out", out, capture=True)
+    except Exception as e:
+        ctx.log("  rexglue patch did not run (%s); falling back to the base build" % e)
+        return None
+    if r.returncode != 0 or not os.path.exists(out):
+        tail = "\n".join(((r.stdout or "") + (r.stderr or "")).splitlines()[-6:])
+        ctx.log("  rexglue patch unavailable/failed (rc=%s); falling back to the base build\n%s"
+                % (getattr(r, "returncode", "?"), tail))
+        return None
+    return out
+
+
 def stage_extract(ctx):
     xex, game_dir = _extract.extract_container(ctx.args.container, ctx._game_out, log=ctx.log)
     ctx.game, ctx.xex = game_dir, xex
-    ctx.mark("extract", {"xex": xex, "game_dir": game_dir})
+    info = {"xex": xex, "game_dir": game_dir}
+    # Generic auto-title-update: if a matching XEX delta-patch (default.xexp) is
+    # present -- bundled in the game tree, or a sibling TU STFS package -- apply it
+    # so we recompile the version the user actually runs. The base default.xex +
+    # default.xexp stay in the game dir so the runtime re-applies the patch at boot
+    # (codegen and runtime then agree on the patched image). Strictly additive:
+    # with no TU, ctx.xex stays the base xex and everything below is unchanged.
+    if not getattr(ctx.args, "no_title_update", False):
+        tu_xexp = _extract.detect_title_update(game_dir, ctx.args.container, xex, log=ctx.log)
+        if tu_xexp:
+            patched = produce_patched_xex(ctx, xex, tu_xexp)
+            if patched:
+                ctx.base_xex, ctx.tu_xexp, ctx.tu_patched = xex, tu_xexp, patched
+                ctx.xex = patched  # codegen (manifest file_path), image dumps + gabarito key
+                info.update(base_xex=xex, tu_xexp=tu_xexp, tu_patched=patched, xex=patched)
+                ctx.log("title-update applied: recompiling the patched image (%s)"
+                        % os.path.basename(patched))
+            else:
+                ctx.log("title-update detected but not applied -- building the base version")
+    ctx.mark("extract", info)
 
 
 def stage_init(ctx):
@@ -973,6 +1020,9 @@ def main():
     ap.add_argument("--from", dest="from_stage", choices=STAGES, help="restart from this stage")
     ap.add_argument("--only", choices=STAGES, help="run just this stage")
     ap.add_argument("--no-jumptables", action="store_true")
+    ap.add_argument("--no-title-update", action="store_true",
+                    help="do not auto-detect/apply an Xbox 360 title update (.xexp); "
+                         "build the base game version")
     ap.add_argument("--heal-iters", type=int, default=20)
     ap.add_argument("--run-seconds", type=int, default=22)
     ap.add_argument("--publish-gabarito", action="store_true",

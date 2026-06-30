@@ -226,6 +226,182 @@ def _find_default_xex(folder):
     return sorted(cands, key=len)[0] if cands else None
 
 
+# --- Title Update (XEX delta-patch) detection -------------------------------
+# An Xbox 360 Title Update ships as an STFS package (Content Type 0x000B0000)
+# wrapping a single default.xexp -- itself a XEX2 carrying a Delta Patch
+# Descriptor optional header (id 0x000005FF). To recompile the version a user
+# actually runs (e.g. Skate 3 3.0.0.0 -> 3.0.3.0) the patch must reach codegen.
+# These helpers are generic and read-only: they return None (no-op) when there
+# is no TU, so a base-only game is unaffected.
+XEX_HEADER_DELTA_PATCH_DESCRIPTOR = 0x000005FF
+XEX_HEADER_EXECUTION_INFO = 0x00040006
+TU_CONTENT_TYPE = 0x000B0000
+
+
+def _read_head(path, n=0x4000):
+    try:
+        with open(path, "rb") as f:
+            return f.read(n)
+    except Exception:
+        return b""
+
+
+def _xex_opt_headers(d):
+    """Yield (id, value) for each XEX2 optional header. value is the be32 that
+    follows the id -- a file offset to the data for the ids we read (0x40006,
+    0x5FF). Empty if d is not a XEX2."""
+    if d[:4] != b"XEX2" or len(d) < 0x18:
+        return
+    count = struct.unpack_from(">I", d, 0x14)[0]
+    for i in range(min(count, (len(d) - 0x18) // 8)):
+        yield struct.unpack_from(">II", d, 0x18 + i * 8)
+
+
+def _xex_opt_value(path, want_id):
+    """Return the data-offset value of optional header want_id (or None)."""
+    d = _read_head(path)
+    for hid, val in _xex_opt_headers(d):
+        if hid == want_id:
+            return val
+    return None
+
+
+def _xex_version_tuple(v):
+    """Decode a xex2_version be32 (major:4, minor:4, build:16, qfe:8)."""
+    return ((v >> 28) & 0xF, (v >> 24) & 0xF, (v >> 8) & 0xFFFF, v & 0xFF)
+
+
+def xex_version_str(v):
+    return "%d.%d.%d.%d" % _xex_version_tuple(v)
+
+
+def is_xex_patch(path):
+    """True iff path is a XEX2 carrying a Delta Patch Descriptor (a TU patch)."""
+    return _xex_opt_value(path, XEX_HEADER_DELTA_PATCH_DESCRIPTOR) is not None
+
+
+def read_delta_descriptor(path):
+    """For a .xexp patch return {'source_version','target_version'} (raw be32s)
+    from the 0x5FF descriptor (size @0, target_version @4, source_version @8),
+    else None."""
+    o = _xex_opt_value(path, XEX_HEADER_DELTA_PATCH_DESCRIPTOR)
+    if o is None:
+        return None
+    d = _read_head(path, o + 0x60)
+    if o + 12 > len(d):
+        return None
+    _size, target, source = struct.unpack_from(">III", d, o)
+    return {"source_version": source, "target_version": target}
+
+
+def xex_base_version(path):
+    """A base xex's own version (execution_info 0x40006, version_value @0x4) so a
+    patch's source_version can be matched against it. None if unavailable."""
+    o = _xex_opt_value(path, XEX_HEADER_EXECUTION_INFO)
+    if o is None:
+        return None
+    d = _read_head(path, o + 0x20)
+    if o + 8 > len(d):
+        return None
+    return struct.unpack_from(">I", d, o + 4)[0]
+
+
+def _stfs_content_type(container):
+    """STFS Content Type @0x344, or None if not an STFS package / unreadable."""
+    d = _read_head(container, 0x400)
+    if d[:4] not in (b"CON ", b"LIVE", b"PIRS") or len(d) < 0x348:
+        return None
+    return struct.unpack_from(">I", d, 0x344)[0]
+
+
+def _extract_xexp_from_stfs(container, out_dir, log):
+    """Pull the lone default.xexp out of a TU STFS package into out_dir."""
+    try:
+        s = Stfs(container)
+    except Exception:
+        return None
+    try:
+        for e in s.file_table():
+            if not e["directory"] and e["name"].lower().endswith(".xexp"):
+                blob = s.read_chain(e["start"], e["length"], e["contiguous"])
+                dest = os.path.join(out_dir, e["name"])
+                with open(dest, "wb") as g:
+                    g.write(blob)
+                log("  extracted %s (%d bytes) from TU package %s"
+                    % (e["name"], len(blob), os.path.basename(container)))
+                return dest
+    except Exception as ex:
+        log("  TU package read failed (%s): %s" % (os.path.basename(container), ex))
+    finally:
+        try:
+            s.f.close()
+        except Exception:
+            pass
+    return None
+
+
+def detect_title_update(game_dir, container, base_xex, log=lambda m: None):
+    """Find a Title Update XEX delta-patch for the just-extracted base game and
+    stage its default.xexp into game_dir. Returns the staged .xexp path or None.
+
+    Two generic detection paths:
+      (a) bundled: a *.xexp already extracted into game_dir (some discs/packages
+          ship the patch inside the game container).
+      (b) sibling TU package: an STFS file (Content Type 0x000B0000, or a TU_*/tu*
+          name) next to the source container whose title_id matches the base game
+          -- its lone default.xexp is extracted into game_dir.
+    Strictly additive: returns None (no-op) whenever no valid, version-matched
+    patch is present, so base-only games are byte-identical to today."""
+    base_ver = xex_base_version(base_xex) if base_xex else None
+
+    def _accept(xexp):
+        if not xexp or not is_xex_patch(xexp):
+            return None
+        desc = read_delta_descriptor(xexp)
+        if not desc:
+            return None
+        sv, tv = desc["source_version"], desc["target_version"]
+        if base_ver is not None and sv != base_ver:
+            log("  title-update %s: source %s != base %s -- skipping (not this build's patch)"
+                % (os.path.basename(xexp), xex_version_str(sv), xex_version_str(base_ver)))
+            return None
+        log("  title-update found: %s -> %s (%s)"
+            % (xex_version_str(sv), xex_version_str(tv), os.path.basename(xexp)))
+        return xexp
+
+    # (a) a .xexp already sitting in the extracted game tree
+    for root, _, files in os.walk(game_dir):
+        for fn in files:
+            if fn.lower().endswith(".xexp"):
+                got = _accept(os.path.join(root, fn))
+                if got:
+                    return got
+
+    # (b) a sibling TU STFS package next to the source container
+    if container and os.path.isfile(container):
+        base_title = (read_package_meta(container) or {}).get("title_id")
+        folder = os.path.dirname(os.path.abspath(container))
+        try:
+            siblings = sorted(os.listdir(folder))
+        except OSError:
+            siblings = []
+        for fn in siblings:
+            p = os.path.join(folder, fn)
+            if not os.path.isfile(p) or os.path.abspath(p) == os.path.abspath(container):
+                continue
+            ct = _stfs_content_type(p)
+            if ct != TU_CONTENT_TYPE and not fn.lower().startswith("tu"):
+                continue
+            if base_title:
+                m = read_package_meta(p)
+                if m.get("title_id") and m["title_id"] != base_title:
+                    continue
+            got = _accept(_extract_xexp_from_stfs(p, game_dir, log))
+            if got:
+                return got
+    return None
+
+
 GDFX_MAGIC = b"MICROSOFT*XBOX*MEDIA"
 
 
