@@ -1,0 +1,12 @@
+{
+ "exe_built": 1,
+ "boots": 1,
+ "alive": 1,
+ "fatals": 0,
+ "fatal_addrs": [],
+ "marker": 1,
+ "marker_str": "gameplay context reached",
+ "health_tier": 3,
+ "run_seconds": 50,
+ "error": ""
+}

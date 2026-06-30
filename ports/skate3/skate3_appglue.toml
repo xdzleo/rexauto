@@ -1,0 +1,130 @@
+# skate3_appglue.toml
+#
+# Title-specific "app glue" that the rexauto pipeline must apply ON TOP of the
+# generated/ recompiled code to reach playable gameplay. This file documents the
+# glue declaratively so the rexauto factory can later generalize it; the
+# load-bearing logic currently lives hand-ported in src/skate3_app.h
+# (class Skate3App : rex::ReXApp), built into skate3.exe.
+#
+# Build: retail / non-TU (default.xex). NOT the title-update path.
+#   manifest setjmp_address = 0x82F44E40, longjmp_address = 0x82F25260.
+#
+# Provenance: distilled from the community port src/skate3_app_common.cpp
+# (Skate3BaseApp). Only the boot-critical subset is enabled here; UI/diagnostic
+# extras (SimpleSettings/Ultrawide dialogs, draw-fingerprint logging, DLC
+# install, ISO/TU installer wizards) are intentionally omitted for the
+# pre-installed retail boot path.
+
+[title]
+name        = "skate3"
+build_kind  = "retail"          # default.xex, no title update
+has_title_update = false
+
+# ---------------------------------------------------------------------------
+# PRIMARY BOOT FIX -- retail alternate-entry stub.
+#
+# guest 0x82EBAE4C is an alternate entry into sub_82EBAE34 (parent 0x82EBAE40,
+# ~37 vtable refs in .data). The lifter intentionally skips parented/overlapping
+# entries and rexauto's toml-healing dropped the 0x82EBAE4C entry, so it is
+# neither emitted to generated code NOR registered. A vtable dispatch
+# (bctrl @ lr=0x8291C138, generated/default/skate3_recomp.48.cpp:~70099) lands on
+# that slot -> null host fn -> call through guest 0x0 ~10s into load.
+#
+# Fix: register a hand-written host stub at runtime BEFORE the load threads spin
+# up (OnPostSetup, first action). This is durable -- do NOT rely on re-adding the
+# entry to skate3_functions.toml, since re-running codegen will skip it again.
+#
+# Retail disassembly of the entry:
+#   lwz   r3, 0x164(r31)
+#   addi  r1, r31, 0x140
+#   b     __restgprlr_19
+# (offsets r31+0x164 / r31+0x140 are retail-specific; the TU build differs.)
+[[function_stub]]
+guest_address = 0x82EBAE4C
+name          = "Sub82EBAE4CImpl"
+parent        = 0x82EBAE40
+reason        = "retail alternate entry skipped by lifter; null-vtable -> 0x0 call @lr=0x8291C138"
+register_in   = "OnPostSetup"   # before load threads start
+requires      = ["__restgprlr_19"]   # extern "C" REX_FUNC, declared in generated/default/skate3_init.h
+body = """
+ctx.r3.u64 = REX_LOAD_U32(ctx.r31.u32 + 0x164);
+ctx.r1.s64 = ctx.r31.s64 + 0x140;
+__restgprlr_19(ctx, base);
+"""
+
+# ---------------------------------------------------------------------------
+# Forced signed-in user identity.
+#
+# A signed-out user leaves a per-user vtable slot NULL; a worker thread later
+# calls through guest 0x0. Force a signed-in identity so the title's per-user
+# objects construct. The xuid is the one the community save dir uses; the
+# community port derives it from its profile store
+# (ApplySelectedProfileToRuntime + skate3_user_settings.*), but a hard-coded
+# value is sufficient for boot.
+[identity]
+xuid     = 0xB13E07DFF9AB6772
+gamertag = "Player"
+applied_in = "OnPostSetup"
+
+# ---------------------------------------------------------------------------
+# Second recompiled module: EAWebkit (menus / web UI live at guest 0x88xxxxxx).
+#
+# Generated under generated/eawebkit (symbol_prefix eawebkit_). Its function
+# table must be initialized and its host mappings registered via the dispatcher
+# once the entrypoint's table exists (OnPostSetup). Done exactly once.
+[[module]]
+name          = "eawebkit"
+file          = "../game/data/webkit/EAWebkit.xex"
+symbol_prefix = "eawebkit_"
+image_config  = "eawebkit_PPCImageConfig"
+register_in   = "OnPostSetup"
+
+# ---------------------------------------------------------------------------
+# Content / BIG device aliases.
+#
+# The title probes world/DLC content through 'big:' and 'dlcbig:' device
+# schemes. Route them to the installed title mount so those files resolve.
+[[device_alias]]
+scheme = "big:"
+target = "\\Device\\Harddisk0\\Partition1"
+[[device_alias]]
+scheme = "dlcbig:"
+target = "\\Device\\Harddisk0\\Partition1"
+
+# ---------------------------------------------------------------------------
+# BIG-directory / recipe VFS overlay.
+#
+# The title probes for the EXISTENCE of several BIG-directory content paths
+# before reading their contents out of the .big archives. Those paths are not
+# real folders, so the probes fail and load stalls. Create empty overlay dirs on
+# a host device (scheme skate3bigdirs:) and symlink the probed guest paths to
+# them. Recipe names are discovered by scanning the first 8 MiB of each
+# data/content/*.big for the literal "data/content/recipe/<name>".
+[recipe_overlay]
+device_scheme   = "skate3bigdirs:"
+overlay_subdir  = "vfs_big_directory_aliases"   # under cache_root
+scan_prefix     = "data/content/recipe/"
+scan_bytes      = 8388608
+content_root    = "<game_data_root>/data/content"
+static_dirs = [
+  "data/scene",
+  "data/scene/anim",
+  "data/scene/trickguide",
+  "data/livingworld/PluginDescriptor",
+  "data/state/livingworldentities/pedestrian/plugin",
+]
+symlinks = [
+  { link = "\\Device\\Harddisk0\\Partition1\\data\\content\\recipe", target = "skate3bigdirs:\\data\\content\\recipe" },
+  { link = "\\Device\\Harddisk0\\Partition1\\data\\scene", target = "skate3bigdirs:\\data\\scene" },
+  { link = "\\Device\\Harddisk0\\Partition1\\data\\livingworld\\PluginDescriptor", target = "skate3bigdirs:\\data\\livingworld\\PluginDescriptor" },
+  { link = "\\Device\\Harddisk0\\Partition1\\data\\state\\livingworldentities\\pedestrian\\plugin", target = "skate3bigdirs:\\data\\state\\livingworldentities\\pedestrian\\plugin" },
+]
+
+# ---------------------------------------------------------------------------
+# Optional / not boot-critical (documented for the factory; NOT wired here).
+[optional]
+fov_override        = "skate3_fov.cpp -- FOV/ultrawide cvars (OnConfigurePaths)"
+user_settings_store = "skate3_user_settings.cpp -- data-driven identity (Load/Save/ApplyProfileCvars)"
+dlc_install         = "InstallDlcPackages -- marketplace content; not needed for first boot"
+installer_wizards   = "skate3_iso_installer / skate3_title_update_installer -- N/A, game pre-installed"
+exception_compat    = "sub_82F44E40 setjmp guard -- SDK fork handles natively (manifest setjmp_address); contingency only"
