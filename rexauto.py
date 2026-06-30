@@ -115,10 +115,10 @@ class Ctx:
         ex = self.load_state().get("extract") or {}
         self.game = ex.get("game_dir") or self._game_out
         self.xex = ex.get("xex")
-        # auto-title-update state (all None for a base-only game -> no behaviour change)
-        self.base_xex = ex.get("base_xex")      # original base xex, when a TU was applied
-        self.tu_xexp = ex.get("tu_xexp")        # the title-update delta patch (default.xexp)
-        self.tu_patched = ex.get("tu_patched")  # the pre-patched full xex codegen recompiles
+        # auto-title-update: the staged .xexp delta (None for a base-only game, so no
+        # behaviour change). codegen+runtime auto-apply it in memory; gabarito_key
+        # folds it in so a TU build keeps its own cure set.
+        self.tu_xexp = ex.get("tu_xexp")
 
     def log(self, msg):
         print("[rexauto] %s" % msg, flush=True)
@@ -164,52 +164,26 @@ def add_includes(ctx, names):
 
 
 # ------------------------------------------------------------------------ stages
-def produce_patched_xex(ctx, base_xex, tu_xexp):
-    """Apply a TU delta (.xexp) to the base xex, producing the full patched xex
-    codegen needs (rexglue codegen consumes a pre-patched full XEX, not a delta).
-    Drives the `rexglue patch` verb. Returns the patched xex path, or None to fall
-    back to the base build -- a missing/failed patcher never breaks a working base
-    build, it just recompiles the base version instead."""
-    out = os.path.join(ctx.port, "%s_patched_default.xex" % ctx.name)
-    os.makedirs(ctx.port, exist_ok=True)
-    try:
-        if os.path.exists(out):
-            os.remove(out)
-        r = rexglue(ctx, "patch", "--base", base_xex, "--xexp", tu_xexp,
-                    "--out", out, capture=True)
-    except Exception as e:
-        ctx.log("  rexglue patch did not run (%s); falling back to the base build" % e)
-        return None
-    if r.returncode != 0 or not os.path.exists(out):
-        tail = "\n".join(((r.stdout or "") + (r.stderr or "")).splitlines()[-6:])
-        ctx.log("  rexglue patch unavailable/failed (rc=%s); falling back to the base build\n%s"
-                % (getattr(r, "returncode", "?"), tail))
-        return None
-    return out
-
-
 def stage_extract(ctx):
     xex, game_dir = _extract.extract_container(ctx.args.container, ctx._game_out, log=ctx.log)
     ctx.game, ctx.xex = game_dir, xex
     info = {"xex": xex, "game_dir": game_dir}
-    # Generic auto-title-update: if a matching XEX delta-patch (default.xexp) is
-    # present -- bundled in the game tree, or a sibling TU STFS package -- apply it
-    # so we recompile the version the user actually runs. The base default.xex +
-    # default.xexp stay in the game dir so the runtime re-applies the patch at boot
-    # (codegen and runtime then agree on the patched image). Strictly additive:
-    # with no TU, ctx.xex stays the base xex and everything below is unchanged.
+    # Generic auto-title-update. detect_title_update stages a matching XEX delta
+    # (default.xexp) beside the base default.xex in the game dir. rexglue's loader
+    # auto-applies a co-located "<base>+p" delta IN MEMORY -- gated by cvar
+    # xex_apply_patches (default on) -- at BOTH codegen (before the analysis
+    # snapshot) and runtime, so we recompile AND run the exact patched version the
+    # user has, with no separate patch step and no SDK change. ctx.xex stays the
+    # base xex; gabarito_key folds the .xexp in so the TU build keeps its own cure
+    # set. Strictly additive: no TU -> ctx.xex is the base xex and codegen input is
+    # byte-identical to before (regression-gate proven).
     if not getattr(ctx.args, "no_title_update", False):
         tu_xexp = _extract.detect_title_update(game_dir, ctx.args.container, xex, log=ctx.log)
         if tu_xexp:
-            patched = produce_patched_xex(ctx, xex, tu_xexp)
-            if patched:
-                ctx.base_xex, ctx.tu_xexp, ctx.tu_patched = xex, tu_xexp, patched
-                ctx.xex = patched  # codegen (manifest file_path), image dumps + gabarito key
-                info.update(base_xex=xex, tu_xexp=tu_xexp, tu_patched=patched, xex=patched)
-                ctx.log("title-update applied: recompiling the patched image (%s)"
-                        % os.path.basename(patched))
-            else:
-                ctx.log("title-update detected but not applied -- building the base version")
+            ctx.tu_xexp = tu_xexp
+            info["tu_xexp"] = tu_xexp
+            ctx.log("title-update staged (%s) -- codegen + runtime auto-apply it in memory"
+                    % os.path.basename(tu_xexp))
     ctx.mark("extract", info)
 
 
@@ -958,9 +932,19 @@ GABARITO_RAW = "https://raw.githubusercontent.com/xdzleo/rexauto/main/gabaritos"
 
 def gabarito_key(ctx):
     """Exact per-binary key: sha256 of the entrypoint default.xex (cures are
-    address-specific, so they must match the exact code image)."""
+    address-specific, so they must match the exact code image). When a title update
+    is applied, codegen + runtime recompile/run the PATCHED image, so fold the
+    .xexp delta into the key -- the TU build's cures are for the patched image and
+    must not collide with (or be seeded from) the base build's."""
+    import hashlib
     try:
-        return _sha256(ctx.xex) if ctx.xex and os.path.exists(ctx.xex) else None
+        if not ctx.xex or not os.path.exists(ctx.xex):
+            return None
+        key = _sha256(ctx.xex)
+        tu = getattr(ctx, "tu_xexp", None)
+        if tu and os.path.exists(tu):
+            key = hashlib.sha256((key + _sha256(tu)).encode()).hexdigest()
+        return key
     except Exception:
         return None
 
