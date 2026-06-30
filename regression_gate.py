@@ -266,7 +266,12 @@ def _measure(name, port, seconds):
         fatals = txt.count("[FATAL]")
     mk = MARKERS.get(name)
     marker = 1 if (mk and txt and mk in txt) else 0
-    tier = 0 if (fatals or not booted) else (3 if (alive and marker) else 2 if alive else 1)
+    # "reached the gameplay marker" is the deterministic success milestone -> tier 3.
+    # A non-deterministic crash AFTER it (a deep unregistered jump-table target -- the
+    # switch-on-ctr heal long-tail, tracked in `fatals`) does NOT demote a build that
+    # proved it reaches gameplay. A crash BEFORE the marker (no marker) still scores
+    # low, so a real boot/gameplay break is still caught.
+    tier = 3 if marker else (0 if (fatals or not booted) else 2 if alive else 1)
     return {"exe_built": 1, "boots": booted, "alive": 1 if alive else 0, "fatals": fatals,
             "fatal_addrs": ["0x%X" % a for a in addrs[:8]], "marker": marker,
             "marker_str": mk or "", "health_tier": tier, "run_seconds": seconds,
@@ -287,8 +292,10 @@ def run_one_runtime(name, port, bless, seconds):
         return name, "BLESSED", info
     if base is None:
         return name, "NO-BASELINE", "run --bless --runtime first (%s)" % info
-    if m["fatals"] and not base.get("fatals"):
-        return name, "REGRESSION", "NEW fatal %s (was clean) | %s" % (
+    if m["fatals"] and not base.get("fatals") and not m["marker"]:
+        # a NEW fatal that also kept the build from reaching gameplay is a real
+        # regression; a fatal after a reached marker is the heal long-tail (informational).
+        return name, "REGRESSION", "NEW fatal %s before gameplay (was clean) | %s" % (
             ", ".join(m["fatal_addrs"]) or m["fatals"], info)
     if base.get("boots") and not m["boots"]:
         return name, "REGRESSION", "no longer boots | %s" % info

@@ -376,14 +376,25 @@ def stage_jumptables(ctx):
 def write_build_bat(ctx):
     bat = os.path.join(ctx.work, "_build.bat")
     sdk = ctx.env["sdk"].replace("\\", "/")
+    # RelWithDebInfo by default: same optimization as Release but with symbols +
+    # line info, so a crash in the recompiled code points straight at the generated
+    # sub_XXXX + line -- the heal/gate debug loop's biggest pain. Codegen is
+    # unaffected (the build type never changes generated/), so it's zero-regression
+    # for the codegen gate. Set REXAUTO_BUILD_TYPE=Release for a stripped, smaller
+    # distribution build.
+    build_type = os.environ.get("REXAUTO_BUILD_TYPE", "RelWithDebInfo")
     lines = [
         "@echo off",
         'call "%s" >nul' % ctx.env["vcvars"],
         'cd /d "%s"' % ctx.port,
-        ('cmake --preset win-amd64-release -DCMAKE_C_COMPILER="%s" '
+        ('cmake --preset win-amd64-release -DCMAKE_BUILD_TYPE=%s '
+         # map imported libs (spdlog/fmt) to their Release variant under
+         # RelWithDebInfo, else CMake links spdlogd.lib (_ITERATOR_DEBUG_LEVEL=2)
+         # against our IDL=0 objects -> lld-link /failifmismatch. Harmless for Release.
+         '-DCMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO=Release -DCMAKE_C_COMPILER="%s" '
          '-DCMAKE_CXX_COMPILER="%s" -DCMAKE_PREFIX_PATH="%s" '
          '-Drexglue_DIR="%s/lib/cmake/rexglue"'
-         % (ctx.env["clang"].replace("\\", "/"), ctx.env["clangxx"].replace("\\", "/"), sdk, sdk)),
+         % (build_type, ctx.env["clang"].replace("\\", "/"), ctx.env["clangxx"].replace("\\", "/"), sdk, sdk)),
         "cmake --build out/build/win-amd64-release --parallel -- -k 0",
         "echo RC=%errorlevel%",
     ]
