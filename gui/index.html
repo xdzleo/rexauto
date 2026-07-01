@@ -440,11 +440,23 @@ function applyMeta(m){
   document.getElementById('gtitle').textContent=m.title||document.getElementById('name').value||'Untitled';
   document.querySelector('#chipid b').textContent=m.title_id||'—';
   document.querySelector('#chipfmt b').textContent=m.container&&/\.(iso)$/i.test(m.container)?'ISO':(m.cover?'STFS':'FOLDER');
-  if(m.cover){document.getElementById('cover').src=m.cover;document.getElementById('cglow').style.backgroundImage=`url(${m.cover})`;
-    document.getElementById('cglow').style.backgroundSize='cover'; ring.style.boxShadow='inset 0 0 0 1px rgba(255,255,255,.16),0 0 34px rgba(108,192,74,.55)';}
+  const coverEl=document.getElementById('cover'), glowEl=document.getElementById('cglow');
+  if(m.cover){coverEl.src=m.cover; coverEl.style.opacity='1';
+    glowEl.style.backgroundImage=`url(${m.cover})`; glowEl.style.backgroundSize='cover';
+    ring.style.boxShadow='inset 0 0 0 1px rgba(255,255,255,.16),0 0 34px rgba(108,192,74,.55)';}
+  else{
+    // ISO / GoD / folder: no embedded cover art (it's a marketplace tile, not on the
+    // disc). Clear any STALE cover from a previous target and show a neutral card
+    // instead of leaving the old game's art (or an empty void). Title shows below.
+    coverEl.removeAttribute('src'); coverEl.style.opacity='0';
+    glowEl.style.backgroundImage='linear-gradient(150deg,#0b1a08,#16330f 55%,#0b1a08)';
+    glowEl.style.backgroundSize='cover';
+    ring.style.boxShadow='inset 0 0 0 1px rgba(255,255,255,.10),0 0 22px rgba(108,192,74,.30)';
+  }
   if(m.container)document.getElementById('cpath').textContent=m.container;
 }
-let metaTimer;
+let metaTimer, nameAuto=true;   // nameAuto: name is auto-derived from the target until the user edits it
+document.getElementById('name').addEventListener('input',()=>{nameAuto=false;});
 document.getElementById('container').addEventListener('input',e=>{
   clearTimeout(metaTimer); const v=e.target.value.trim().replace(/^"|"$/g,'');
   if(v.length<4)return;
@@ -452,10 +464,11 @@ document.getElementById('container').addEventListener('input',e=>{
     const r=await fetch('/api/meta?container='+encodeURIComponent(v)); const m=await r.json();
     m.container=v; applyMeta(m);
     const nameEl=document.getElementById('name');
-    if(m.title&&(nameEl.value===''||nameEl.value==='game')){
+    // re-derive the name whenever the target changes, UNLESS the user typed their own
+    if(m.title&&(nameAuto||nameEl.value===''||nameEl.value==='game')){
       let n=m.title.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'').slice(0,40).replace(/_+$/,'');
       if(/^[0-9]/.test(n))n='g_'+n;
-      nameEl.value=n||'game';
+      nameEl.value=n||'game'; nameAuto=true;   // still auto (we set it, not the user)
     }
   }catch(_){}} ,450);
 });
