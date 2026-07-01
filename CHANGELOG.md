@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.6.0 — "Gears boots" (2026-07-01)
+
+A one-line **runtime** fix (found by a multi-agent IDA-Pro diagnosis) makes Gears of
+War Judgment boot **stably deep into startup** — it now survives 47s+ alive with no
+fatal (was a non-deterministic ~5s crash). **SDK runtime changes** (`rexruntime.dll`);
+`rexglue.exe` (codegen) is byte-identical, so the fleet's generated code is untouched.
+
+- **Root cause (a dangling guest string_view):** `xeXamContentCreate` captured
+  `root_name = root_name.value()` into its deferred-completion lambda. `MappedPtr<char>::
+  value()` returns a `std::string_view` over GUEST memory (no copy); the completion runs
+  ~100ms later, by which time the guest recycled the buffer. If the recycled bytes were
+  not valid UTF-8, the content-path conversion (the checked utfcpp API) threw
+  `utf8::invalid_utf8` → `REX_FATAL("...threw 'Invalid UTF-8'")`. Even when benign, the
+  save package mounted under a garbage root, so the `SG0_0:` save device never resolved.
+- **Fix:** own the bytes at call time — `root_name = std::string(root_name.value())`.
+  Semantics-preserving for any well-behaved caller; only fixes the recycled-buffer case.
+  On Gears: the crash is gone AND `SG0_0:` now mounts (via `\Device\Content\N\`).
+- Zero regression: codegen byte-identical across all 10 baselined fleet games (rexglue
+  unchanged); the change is one localized, semantics-preserving capture. `SDK_PIN`
+  `rexruntime.dll` bumped; `rexglue.exe` `06b93244` unchanged. Gears baseline re-blessed.
+- Honest limit: the remaining Gears walls (a media-verification watchdog it tolerates,
+  intro-movie playback) are runtime/GPU emulation, not recompilation.
+
 ## 2.5.1 — "boot deeper" (2026-07-01)
 
 Run-heal now keeps hand-written asm routines WHOLE instead of splitting them, so

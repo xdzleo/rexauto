@@ -1266,7 +1266,7 @@ SDK_PIN = {
     # was already complete (visited/blockStarts guard) -> fleet codegen byte-identical. rexruntime
     # UNCHANGED (0ce11411; the runtime links no codegen) -> zero runtime-behavior change fleet-wide.
     "rexglue.exe":    "06b932444f9a4590d265a1714ac3d906d73874d65f5f53fba3bed5f840711e29",
-    "rexruntime.dll": "0ce11411e435dd6ef4428e8b33d82561de6741be825b10d969fe907a767fe94b",
+    "rexruntime.dll": "4e75b494db3d8206768061a02de7491ed9f16b6773c77d50cc0890888185c78c",
 }
 
 
