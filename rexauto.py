@@ -1197,8 +1197,12 @@ SDK_PIN = {
     # HEAD 3b0d7cc; C++ links are non-reproducible so the exact bytes differ from the
     # first v1.9 build) so the shipped rexauto.exe pin == the sha256 of rexglue/tool/*
     # in the shipped rexglue-sdk-win64.zip. cmake --install refreshed the whole tree.
-    "rexglue.exe":    "f79a3881a47bd6ddfe841c12094fd3dd48c3a1e23620bb76aaa4873ac2da9eea",
-    "rexruntime.dll": "c503f763ab45f55a113503b3d20b0705e1813b19a90bbf0eb35b9864b9465bd8",
+    # v2.0 (SDK commit b363c08): three runtime fixes from the SVR07 (Yukes) crack —
+    # (1) FPSCR host-thread MXCSR mask leak -> no more spurious STATUS_FLOAT_INEXACT_RESULT
+    # on host-thread guest dispatch (fleet-wide); (2) writable cache: VFS mount; (3) xenia
+    # ranged-alloc offset. Codegen untouched -> gate 10/10 byte-identical + skate3 runtime PASS.
+    "rexglue.exe":    "95010481d950390f4230317aafdfbadd59e17ad74189b5e2e5228724151e4301",
+    "rexruntime.dll": "0ce11411e435dd6ef4428e8b33d82561de6741be825b10d969fe907a767fe94b",
 }
 
 

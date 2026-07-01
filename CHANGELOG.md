@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.3.0 — "the Yukes crack" (2026-07-01)
+
+Cracked **WWE SmackDown vs Raw 2007** (Yukes engine, title 545107E0) — it now boots
+to the in-game menu (playable). The community needed a custom `rexglue-sdk-yukes`
+fork "with fixes this game depends on"; a 16-agent diff of their **working** build
+against ours found the truth was inverted — *ours is the newer, superset SDK*, and
+the blocker was a **regression in our own runtime**. Three SDK runtime fixes, all
+**codegen-untouched → the whole fleet's generated C++ stays byte-identical**
+(regression gate: 10/10 blessed titles identical, skate3 runtime PASS).
+
+### The fatal fix — FPSCR host-thread MXCSR mask leak (fleet-wide)
+- `XHostThread::Execute` ran guest FP over a context that never called `InitHost()`,
+  so its cached MXCSR was `0` (memset). The guest's flush-mode toggles then wrote
+  `MXCSR=0`, **unmasking the inexact FP exception** → the next inexact float op
+  trapped as `STATUS_FLOAT_INEXACT_RESULT` (`0xC000008F`) ~13s into play. Guest
+  `XThread::Execute` already inits FP; host worker threads did not.
+- Fix (`xthread.cpp`): `thread_state_->context()->fpscr.InitHost()` at the top of
+  `XHostThread::Execute`. **Generalizes to every title** with host-thread guest
+  dispatch, and obsoletes the two per-path re-mask band-aids (audio / xma decoder)
+  that were whack-a-moling this exact `STATUS_FLOAT_INEXACT_RESULT`.
+
+### Writable `cache:` VFS device (fleet-wide)
+- Yukes titles decompress their PAC asset packs into the Xbox 360 `CACHE:` scratch
+  partition; with no device mounted every `CACHE:\...` open returned `0xC000000F`.
+  `Runtime::SetupVfs` now mounts a **writable** `HostPathDevice`
+  (`cache_root_/guest_cache`) + `RegisterSymbolicLink("cache:")`. Any title that
+  uses the 360 cache partition now works.
+
+### Ranged physical-alloc offset (xenia parity)
+- Enabled the xenia `ignore_offset_for_ranged_allocations` behaviour in
+  `MmAllocatePhysicalMemoryEx` (drop the physical offset for a ranged request; the
+  in-code note names WWE SvR `545107E0`/`545108B4`). **Ranged-only** → the common
+  `MmAllocatePhysicalMemory` path is byte-identical.
+
+### Fleet / gate
+- **SVR07 added as a tracked title** (codegen baseline blessed, 58 files).
+- SDK commit `b363c08` (rexglue-skate3 `fork-base`); `SDK_PIN` bumped to
+  rexglue.exe `95010481` / rexruntime.dll `0ce11411`. Every runtime change is
+  additive/corrective and the regression gate proves no fleet title regressed.
+- Sibling Yukes/THQ titles (e.g. WWE SvR 2008 `545108B4`) now inherit all three
+  fixes for free — the first game of a family is the hard one; the rest are cheap.
+
 ## 2.2.0 — "parity, proven" (2026-06-30)
 
 A full parity audit against the community build (mchughalex/skate3recomp, source
