@@ -40,6 +40,17 @@ endif()
 
 rexglue_setup_target(skate3)
 
+# --- Precompiled header (build perf, output-neutral) -------------------------
+# Every generated default-module TU opens with #include "skate3_init.h", a
+# ~1.5MB / 48.6k-line monolith (48k DECLARE_REX_FUNC externs + heavy C++23 STL).
+# Its front-end parse is a fixed per-TU floor (even a 24-function TU costs ~3.7s
+# = pure header parse), paid once per TU. A PCH parses it ONCE (~21% faster per
+# default TU, small TUs 3x). Caches the parsed AST only -- never changes emitted
+# code, so .text / the binary stay byte-identical (codegen md5 gate unaffected).
+# The eawebkit 2nd module includes a DIFFERENT init.h, so its TUs SKIP this PCH.
+target_precompile_headers(skate3 PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/skate3_init.h")
+
 # Retail / non-TU build: the title update code path stays disabled (the game
 # data is already installed; this is the proven-playable retail configuration).
 target_compile_definitions(skate3 PRIVATE
@@ -74,6 +85,10 @@ foreach(_rexauto_mod eawebkit)
         set(_rexauto_saved "${GENERATED_SOURCES}")
         include(generated/${_rexauto_mod}/sources.cmake)
         target_sources(skate3 PRIVATE ${GENERATED_SOURCES})
+        # this module's TUs include their own <mod>_init.h, not skate3_init.h,
+        # so they must NOT get the skate3 PCH force-included (wrong-header).
+        set_source_files_properties(${GENERATED_SOURCES} PROPERTIES
+            SKIP_PRECOMPILE_HEADERS ON)
         target_include_directories(skate3 PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/generated/${_rexauto_mod}")
         set(GENERATED_SOURCES "${_rexauto_saved}")
