@@ -43,6 +43,7 @@ sys.path.insert(0, HERE)
 import extract as _extract
 import heal as _heal
 import jt_landings as _jt
+import codegen_patches as _cgp
 
 STAGES = ["extract", "init", "setjmp", "jumptables", "build", "runheal", "run"]
 MAX_BUILD_ATTEMPTS = 12
@@ -461,6 +462,10 @@ def do_codegen(ctx, env=None, level="error"):
             # them. No-op (returns 0) for a title whose switches all resolve.
             if _jt.heal(ctx, log=ctx.log):
                 continue
+            # splice any declarative post-codegen source patches (e.g. the skate3
+            # FOV / ultrawide-frustum render hooks) once codegen has converged and
+            # before compile. No <name>_codegen_patches.toml -> no-op (byte-identical).
+            _cgp.apply(ctx, log=ctx.log)
             _gen_restore_unchanged(ctx, snap)
             return out
         targets = _heal.unresolved_calls_from_text(out)

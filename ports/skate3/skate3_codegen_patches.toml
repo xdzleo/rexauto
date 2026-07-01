@@ -1,0 +1,39 @@
+# skate3_codegen_patches.toml
+#
+# Declarative post-codegen source patches the rexauto pipeline splices into the
+# generated skate3_recomp.*.cpp after codegen converges (see rexauto codegen_patches.py).
+# These re-implement the two RENDERING hooks the community port injects via
+# cmake/ApplySkate3CodegenPatches.cmake, so our build loses nothing to theirs:
+#
+#   1. projection FOV  -> makes the skate3_field_of_view cvar / SimpleSettings FOV
+#      slider actually change the projection FOV (host fn in src/skate3_fov.cpp).
+#   2. ultrawide game-frustum -> widens the guest cull-frustum so objects at the
+#      screen edge are not culled under ultrawide (host helper in
+#      src/skate3_ultrawide_guest.h; host-side Hor+/NDC ultrawide already worked).
+#
+# The community's third patch (demo_path intro-movie skip) is intentionally NOT
+# ported: it is dev/QA boot-automation gated behind an off-by-default cvar.
+#
+# Each patch is idempotent (skipped once `marker` is present) and HARD-FAILS if
+# its anchor is not found -- a codegen re-layout must never silently drop it.
+
+[[patch]]
+name    = "projection_fov"
+kind    = "literal"
+require = [
+  "ctx.f27.f64 = ctx.f1.f64;",
+  "ctx.f4.f64 = double(float(ctx.f1.f64 * ctx.f0.f64));",
+]
+find    = "ctx.f27.f64 = ctx.f1.f64;"
+replace = "ctx.f1.f64 = double(Skate3MaybeOverrideProjectionFovRadians(float(ctx.f1.f64)));\n\tctx.f27.f64 = ctx.f1.f64;"
+marker  = "Skate3MaybeOverrideProjectionFovRadians"
+include = "skate3_fov.h"
+
+[[patch]]
+name    = "ultrawide_frustum"
+kind    = "insert_before_call_after_anchor"
+anchor  = "ctx.r6.u64 = REX_LOAD_U32(ctx.r4.u32 + 5260);"
+window  = 12000
+inject  = "Skate3UltrawideGameFrustumPatchScope skate3_ultrawide_game_frustum_patch_scope(\n\t\tctx, base, ctx.r4.u32);"
+marker  = "Skate3UltrawideGameFrustumPatchScope"
+include = "skate3_ultrawide_guest.h"

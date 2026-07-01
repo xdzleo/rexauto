@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.2.0 — "parity, proven" (2026-06-30)
+
+A full parity audit against the community build (mchughalex/skate3recomp, source
+cloned and diffed dimension-by-dimension) confirmed our Skate 3 is **ahead** — same
+app layer (DLC/marketplace, ISO installer, profiles, host-side ultrawide, EAWebkit
+menus, fonts all byte-identical), a **superset** of recompiled-code coverage, and it
+ships the **Title-Update-3-patched image** (the "ours is retail" worry was false:
+manifest setjmp/longjmp = their TU3 addresses, and `game/*.xexp` SHA-256 match). The
+audit found **three** real user-facing things their build system wired that ours did
+not — now closed, generically.
+
+### New pipeline stage: `codegen_patches`
+- **`codegen_patches.py`, wired into `do_codegen`**: a declarative, per-project
+  `<name>_codegen_patches.toml` splices host-side hooks into the generated
+  `<name>_recomp.*.cpp` after codegen converges and before compile. Two reusable
+  kinds — `literal` (exact find→replace in the one file matching every `require`) and
+  `insert_before_call_after_anchor` (find the first generated guest call after an
+  anchor and inject a line). Each patch is **idempotent** (`marker`) and **hard-fails**
+  if its anchor is gone (a codegen re-layout must never silently drop a shipped
+  behaviour). No config → no-op (fleet byte-identical). This generalizes the
+  community's hand-written `cmake/ApplySkate3CodegenPatches.cmake` to the whole fleet.
+
+### Skate 3 parity gaps closed
+- **Projection-FOV hook** — the `skate3_field_of_view` / SimpleSettings FOV slider was
+  inert (the host fn in `src/skate3_fov.cpp` was compiled but never called from
+  generated code). A `literal` codegen patch now injects the override at the
+  projection-matrix site. The slider changes FOV.
+- **Ultrawide game-frustum hook** — host-side Hor+/NDC ultrawide already worked, but the
+  guest cull-frustum wasn't widened (objects culled at screen edges under ultrawide). An
+  `insert_before_call_after_anchor` patch injects `Skate3UltrawideGameFrustumPatchScope`
+  at the frustum-setup call.
+- **Win32 Per-Monitor-V2 DPI manifest** — added `src/skate3_app.manifest` (PerMonitorV2 +
+  Common-Controls v6) and linked it via `LINKER:/MANIFESTINPUT`. Fixes high-DPI window
+  blur and the skewed monitor-size feed into ultrawide aspect derivation.
+- skate3.exe rebuilt against the shipped **v1.9 SDK** (rexruntime `c503f763`); all three
+  patches verified compiled/embedded (`Skate3MaybeOverrideProjectionFovRadians`,
+  `Skate3UltrawideGameFrustumPatchScope`, `PerMonitorV2` all present in the exe).
+
+The community's demo_path boot-automation (off-by-default QA cvar) and interactive TU
+installer wizard remain intentional non-gaps — we pre-stage the identical verified TU3
+payloads at build time instead.
+
 ## 2.1.0 — "the long-tail, closed" (2026-06-30)
 
 Closes the one open item from 2.0.0: the **switch-on-ctr heal long-tail** that made

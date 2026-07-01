@@ -57,6 +57,12 @@ target_include_directories(skate3 PRIVATE
 
 if(WIN32)
     target_link_libraries(skate3 PRIVATE comdlg32 winhttp)
+    # Per-Monitor-V2 DPI awareness + Common-Controls v6 (matches the community
+    # port): without this the window DPI-virtualizes (blurry) on high-DPI
+    # displays and GetMonitorInfo returns virtualized sizes that skew the
+    # ultrawide aspect derivation.
+    target_link_options(skate3 PRIVATE
+        "LINKER:/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/src/skate3_app.manifest")
 endif()
 
 # rexauto: extra recompiled modules (EAWebkit etc.) linked into the same exe.
