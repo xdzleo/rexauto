@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.4.2 — "cover art" (2026-07-01)
+
+Cover art for **ISO / GoD / folder** targets in the desktop app. Xbox 360 discs don't
+embed cover art (it's a marketplace tile, not on the disc), so ISO targets used to show
+a blank card. Now the GUI fetches the game's tile by `title_id`.
+
+- **title_id from the disc's `default.xex`** — a new XEX2 parser reads the execution-info
+  header (validated: SVR07 → `545107E0`, skate3 → `454108E6`). `read_package_meta` now
+  fills `title_id` for raw XEX / folder / GDFX ISO targets. The ISO reader walks the GDFX
+  at every XGD base offset (0x0, XGD2 `0xFD90000`, XGD3 `0x2080000`, …) — proven on real
+  Captain America (XGD2), Gears of War Judgment (XGD3), and skate3 (base 0x0) images, and
+  it correctly returns nothing for a non-Xbox disc (e.g. the PS3 Skate 3).
+- **Cover fetched from XboxUnity** by title_id (`fetch_title_icon`), cached under `covers/`
+  so it's pulled once per title. Best-effort and offline-safe — a network failure just
+  falls back to the placeholder; a title with no tile is negative-cached.
+- No pipeline/codegen change; SDK unchanged (`95010481` / `0ce11411`).
+
 ## 2.4.1 — "right target, clear signal" (2026-07-01)
 
 Desktop-app (GUI) + extract UX fixes. No pipeline/codegen change; SDK unchanged.

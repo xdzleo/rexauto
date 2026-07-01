@@ -57,6 +57,19 @@ def pipeline_command(container, name, do_run):
     return cmd
 
 
+def _cover_data_url(meta):
+    """PNG data URL for the target's cover: the embedded STFS thumbnail, or -- since
+    Xbox 360 discs (ISO/GoD/folder) don't embed cover art -- the XboxUnity tile
+    fetched by title_id (best-effort, cached, offline-safe)."""
+    png = meta.get("cover")
+    if not png and meta.get("title_id"):
+        try:
+            png = _extract.fetch_title_icon(meta["title_id"])
+        except Exception:
+            png = None
+    return ("data:image/png;base64," + base64.b64encode(png).decode()) if png else None
+
+
 class Hub:
     """Fan-out of pipeline events to all connected SSE clients + run control."""
 
@@ -101,9 +114,7 @@ class Hub:
         self.history = []
         self.stage_idx = -1
         meta = _extract.read_package_meta(container)
-        cover = None
-        if meta.get("cover"):
-            cover = "data:image/png;base64," + base64.b64encode(meta["cover"]).decode()
+        cover = _cover_data_url(meta)
         self.emit({"type": "meta", "title": meta.get("title") or name,
                    "title_id": meta.get("title_id"), "cover": cover,
                    "container": container, "name": name})
@@ -230,9 +241,7 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query)
             container = (q.get("container") or [""])[0]
             meta = _extract.read_package_meta(container)
-            cover = None
-            if meta.get("cover"):
-                cover = "data:image/png;base64," + base64.b64encode(meta["cover"]).decode()
+            cover = _cover_data_url(meta)
             return self._send(200, "application/json",
                               json.dumps({"title": meta.get("title"),
                                           "title_id": meta.get("title_id"), "cover": cover}))

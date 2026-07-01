@@ -181,6 +181,10 @@ def read_package_meta(container):
     try:
         if os.path.isdir(container):
             meta["title"] = fallback_title
+            try:
+                meta["title_id"] = _container_title_id(container)
+            except Exception:
+                pass
             return meta
         with open(container, "rb") as f:
             d = f.read(0xC000)
@@ -188,9 +192,14 @@ def read_package_meta(container):
         meta["title"] = fallback_title
         return meta
     if d[:4] not in (b"CON ", b"LIVE", b"PIRS"):
-        # ISO (GDFX), GoD (SVOD) or anything else: no STFS header -> use the
-        # file name as the display title.
+        # ISO (GDFX), GoD (SVOD), folder or raw XEX: no STFS header -> title from
+        # the file name, and (best-effort, for cover art) the title_id read from
+        # the default.xex's XEX2 execution-info header.
         meta["title"] = fallback_title
+        try:
+            meta["title_id"] = _container_title_id(container)
+        except Exception:
+            pass
         return meta
     try:
         name = d[0x411:0x411 + 0x80].decode("utf-16-be", "ignore").split("\x00")[0].strip()
@@ -207,6 +216,98 @@ def read_package_meta(container):
         if k > 0:
             meta["cover"] = d[j:k + 8]
     return meta
+
+
+def _xex_title_id(head):
+    """title_id (8 hex) from a XEX2 header blob. The XEX2 optional-header directory
+    (count @0x14, entries @0x18 as {key,value}) points key 0x00040006
+    (execution info) at an offset whose +0x0C dword is the title_id. Validated:
+    SVR07 default.xex -> 545107E0."""
+    if head[:4] != b"XEX2":
+        return None
+    try:
+        cnt = struct.unpack_from(">I", head, 0x14)[0]
+        if cnt > 4096:
+            return None
+        for i in range(cnt):
+            key, val = struct.unpack_from(">II", head, 0x18 + i * 8)
+            if key == 0x00040006 and val + 0x10 <= len(head):
+                return "%08X" % struct.unpack_from(">I", head, val + 0x0C)[0]
+    except Exception:
+        pass
+    return None
+
+
+def _container_title_id(container):
+    """Best-effort title_id for a non-STFS container (raw XEX / folder / GDFX ISO),
+    read from the default.xex. Offline; returns None on anything unhandled."""
+    if os.path.isdir(container):
+        xex = _find_default_xex(container)
+        if not xex:
+            return None
+        with open(xex, "rb") as f:
+            return _xex_title_id(f.read(0x8000))
+    with open(container, "rb") as f:
+        head = f.read(0x8000)
+    if head[:4] == b"XEX2":                     # raw default.xex
+        return _xex_title_id(head)
+    base = _iso_base(container)                 # GDFX ISO
+    if base is None:
+        return None
+    with open(container, "rb") as f:
+        def rd(sec, n):
+            f.seek(base + sec * 0x800)
+            return f.read(n)
+        vd = rd(32, 0x800)
+        if vd[:20] != GDFX_MAGIC:
+            return None
+        root_sector, root_size = struct.unpack_from("<II", vd, 0x14)
+        for rel, sec, sz in _walk_gdfx(rd, root_sector, root_size):
+            if rel.rsplit("/", 1)[-1].lower() == "default.xex":
+                return _xex_title_id(rd(sec, 0x8000))
+    return None
+
+
+def fetch_title_icon(title_id, cache_dir=None, timeout=12):
+    """Fetch the game's cover/icon PNG from XboxUnity by title_id -- Xbox 360 discs
+    do NOT embed cover art (it's a marketplace tile), so ISO/GoD/folder targets
+    have no local cover. Cached so it's fetched once per title; returns PNG bytes
+    or None (best-effort, network-optional, never raises)."""
+    if not title_id:
+        return None
+    tid = str(title_id).upper()
+    if cache_dir is None:
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "covers")
+    hit = os.path.join(cache_dir, tid + ".png")
+    miss = os.path.join(cache_dir, tid + ".none")
+    if os.path.exists(hit):
+        try:
+            return open(hit, "rb").read()
+        except OSError:
+            pass
+    if os.path.exists(miss):
+        return None
+    try:
+        import urllib.request
+        url = "https://xboxunity.net/Resources/Lib/Icon.php?tid=" + tid
+        req = urllib.request.Request(url, headers={"User-Agent": "rexauto"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = r.read()
+    except Exception:
+        return None                             # network issue -> retry later, don't negative-cache
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) > 100:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            open(hit, "wb").write(data)
+        except OSError:
+            pass
+        return data
+    try:                                        # server answered but no icon -> negative cache
+        os.makedirs(cache_dir, exist_ok=True)
+        open(miss, "w").close()
+    except OSError:
+        pass
+    return None
 
 
 def _looks_like_xex(path):
