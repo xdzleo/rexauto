@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.5.1 — "boot deeper" (2026-07-01)
+
+Run-heal now keeps hand-written asm routines WHOLE instead of splitting them, so
+Gears of War Judgment boots far past its intro decompressor (GPU up → movies →
+networking → media verification, vs the old ~1s crash). **rexauto-only; SDK
+unchanged** (`rexglue.exe` `06b93244`, `rexruntime.dll` `0ce11411`).
+
+- **Root cause:** the intro decompressor (`sub_830AFE28`, a switch-on-ctr state machine
+  with a shared-tail loop-back) had an under-recovered jump table (IDA found 7 of ~10
+  landings). At runtime the missing landings hit `default: REX_CALL_INDIRECT_FUNC` →
+  "invalid function"; the play-and-heal loop then registered them as standalone `{}`
+  functions, which SPLIT the routine — turning a healable "invalid function" into an
+  UN-healable `REX_FATAL("Unresolved branch")` when the split copy's loop-back branched
+  into the parent.
+- **`heal.register_or_seed`:** an unregistered-function address that falls INSIDE an
+  existing function's `end`-override span is a landing of that routine, not a new
+  function → route it to forced_landings (keeps the routine whole), never a `{}` split.
+- **`heal.extend_switch_table`:** such a landing is also added as a `case` to the
+  routine's bctr switch table (so the dispatch resolves it instead of hitting the
+  default), paired with its forced_landings `loc_`. Under-recovered bctr tables now
+  self-heal at runtime.
+- Zero regression: `regression_gate.py` codegen byte-identical across all 10 baselined
+  fleet games (these are run-heal changes; they never touch a passing game's data).
+  Gears baseline re-blessed. Remaining Gears walls (media-verification DRM loop, an
+  "Invalid UTF-8" async completion) are runtime/kernel-emulation, not recompilation.
+
 ## 2.5.0 — "Gears builds" (2026-07-01)
 
 Adds **Gears of War Judgment** — the fleet's largest title (59,396 functions, 124 codegen

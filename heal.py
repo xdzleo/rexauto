@@ -216,6 +216,67 @@ def ensure_manifest_include(manifest_path, include_name):
     open(manifest_path, "w").write(txt[:m.start()] + new + txt[m.end():])
 
 
+def extend_switch_table(addrs, switch_path, spans):
+    """For each addr inside a function `end`-span that also contains a bctr switch table,
+    add the addr to THAT table's labels. A runtime "invalid function" for an in-routine
+    address is a jump-table landing the heuristic under-recovered: it hit the switch's
+    `default: REX_CALL_INDIRECT_FUNC` because it was never a `case`. Adding it as a case
+    makes build_bctr lower `case 0xA: goto loc_A;` (paired with a forced_landings loc_).
+    `spans` = [(start,end)] of end-override routines. Returns count of labels added."""
+    if not addrs or not os.path.exists(switch_path):
+        return 0
+    txt = _read_text(switch_path)
+    added = 0
+    # walk each [[switch_tables]] block: capture its bctr `address` and `labels` array
+    blocks = list(re.finditer(
+        r'(\[\[switch_tables\]\].*?address\s*=\s*0x([0-9A-Fa-f]+).*?labels\s*=\s*)\[([^\]]*)\]',
+        txt, re.S))
+    for m in reversed(blocks):                       # reversed so earlier spans stay valid
+        bctr = int(m.group(2), 16)
+        routine = next(((s, e) for (s, e) in spans if s <= bctr < e), None)
+        if not routine:
+            continue
+        s, e = routine
+        cur = [int(x, 16) for x in re.findall(r'0x[0-9A-Fa-f]+', m.group(3))]
+        want = [a for a in addrs if s <= a < e and a not in cur]
+        if not want:
+            continue
+        merged = sorted(set(cur) | set(want))
+        added += len(merged) - len(cur)
+        body = ", ".join("0x%08X" % a for a in merged)
+        txt = txt[:m.start()] + m.group(1) + "[" + body + "]" + txt[m.end():]
+    if added:
+        open(switch_path, "w").write(txt)
+    return added
+
+
+def register_or_seed(addrs, toml_path, forced_path, switch_path=None):
+    """Partition unregistered-function addresses. Any addr that falls INSIDE an existing
+    function's `end`-override span is a computed-goto/jump-table LANDING of that routine
+    (an indirect target the runtime reached but the static scan left uncovered) -- route
+    it to forced_landings so it becomes an in-function block, keeping the routine WHOLE.
+    Registering it as a standalone {} instead would SPLIT the routine, and any internal
+    loop-back branch into the parent (e.g. a decompressor's `blt -> loc_head`) then
+    lowers to REX_FATAL("Unresolved branch") -- a crash the play-and-heal loop can never
+    fix (it only heals "invalid function", not "unresolved branch"). Everything else is a
+    genuine new function -> {} registration. Returns (n_registered, n_seeded)."""
+    full = load_overrides_full(toml_path)
+    spans = [(a, v["end"]) for a, v in full.items() if v.get("end")]
+
+    def in_routine(x):
+        return any(s <= x < e for s, e in spans)
+
+    landings = sorted(a for a in addrs if in_routine(a))
+    funcs = [a for a in addrs if not in_routine(a)]
+    n_reg = register_functions(funcs, toml_path)
+    # A landing needs BOTH the switch `case` (so the routine's bctr dispatches to it
+    # instead of falling to `default: REX_CALL_INDIRECT_FUNC`) and the `loc_` block
+    # (so `case 0xA: goto loc_A;` has a target). Add both; either being new is progress.
+    n_case = extend_switch_table(landings, switch_path, spans) if (landings and switch_path) else 0
+    n_seed = write_forced(forced_path, landings) if landings else 0
+    return n_reg, n_seed + n_case
+
+
 def invalid_functions_from_text(txt):
     """Distinct guest addresses the dispatcher flagged as unregistered."""
     return sorted(set(int(m.group(1), 16) for m in INVALID.finditer(txt)))

@@ -1145,8 +1145,12 @@ def stage_runheal(ctx):
         txt, _ = run_once(ctx, ctx.args.run_seconds, discover=True)
         addrs = [a for a in _heal.invalid_functions_from_text(txt)
                  if lo <= a < hi and (a & 3) == 0]
-        n = _heal.register_functions(addrs, ctx.functions)
-        ctx.log("discover round %d: %d in-range targets -> +%d new" % (r, len(addrs), n))
+        n_reg, n_seed = _heal.register_or_seed(addrs, ctx.functions, ctx.forced, ctx.switches)
+        if n_seed:
+            _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
+        n = n_reg + n_seed
+        ctx.log("discover round %d: %d in-range targets -> +%d new (%d fn, %d landing)"
+                % (r, len(addrs), n, n_reg, n_seed))
         if n == 0:
             break
         do_codegen(ctx)
@@ -1186,9 +1190,12 @@ def stage_runheal(ctx):
                                             "confirmed_seconds": confirm_seconds})
             ctx.log("  confirmation surfaced %d late fatal(s); continuing heal" % len(caddrs))
             addrs, txt = caddrs, ctxt
-        n = _heal.register_functions(addrs, ctx.functions)
-        ctx.log("iter %d: fatal @ %s -> +%d registered; rebuilding"
-                % (it, ",".join("0x%X" % a for a in addrs), n))
+        n_reg, n_seed = _heal.register_or_seed(addrs, ctx.functions, ctx.forced, ctx.switches)
+        if n_seed:
+            _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
+        n = n_reg + n_seed
+        ctx.log("iter %d: fatal @ %s -> +%d (%d fn, %d landing); rebuilding"
+                % (it, ",".join("0x%X" % a for a in addrs), n, n_reg, n_seed))
         if n == 0:
             ctx.log("  stuck on 0x%X (already registered) — needs a closer look" % addrs[0])
             return ctx.mark("runheal", {"stuck": "0x%X" % addrs[0]})
