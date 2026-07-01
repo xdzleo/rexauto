@@ -1174,12 +1174,19 @@ def stage_runheal(ctx):
     confirm_seconds = max(ctx.args.run_seconds * 2, ctx.args.run_seconds + 25)
     for it in range(1, ctx.args.heal_iters + 1):
         txt, alive = run_once(ctx, ctx.args.run_seconds)
-        addrs = _heal.invalid_functions_from_text(txt)
+        # Range-filter like the fast-discovery loop above: a FATAL can name an address
+        # OUTSIDE this module's recompiled code range (e.g. a call into a companion XEX
+        # a multi-XEX title loads at 0x88000000+). Registering such an out-of-image
+        # address as a {} function corrupts the port -- it killed sonic_adventure's boot
+        # (a stray "0x88610000" = {}). Only heal targets that live in this image.
+        addrs = [a for a in _heal.invalid_functions_from_text(txt)
+                 if lo <= a < hi and (a & 3) == 0]
         if not addrs:
             ctx.log("  no invalid-function fatal in %ds; confirming with a %ds window"
                     % (ctx.args.run_seconds, confirm_seconds))
             ctxt, calive = run_once(ctx, confirm_seconds)
-            caddrs = _heal.invalid_functions_from_text(ctxt)
+            caddrs = [a for a in _heal.invalid_functions_from_text(ctxt)
+                      if lo <= a < hi and (a & 3) == 0]
             if not caddrs:
                 verdict = ("survived %ds with no invalid-function fatal" % confirm_seconds) if calive \
                     else "exited without an invalid-function fatal (other stop - likely GPU/runtime)"
