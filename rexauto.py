@@ -1188,8 +1188,12 @@ SDK_PIN = {
     # Keeps v1.7's switch-on-ctr build_bctr + discovery-trap. Runtime also carries
     # caller-lr in the invalid-call FATAL + GPU command-ring memory fixes (battle-freeze).
     # SDK commits 8b84c2d (codegen) + 3b0d7cc (runtime); gate 9/9 byte-identical.
-    "rexglue.exe":    "3e33bf857b38401c4e202caaaa775fe242f27c72ff36d6db8757299f1262033c",
-    "rexruntime.dll": "40d30ba5d1d6873259703f22c625fa999d394e93f240e16bf28c098c16dfd5a0",
+    # Pin re-generated to the actually-shipped v1.9 binaries (rebuilt from the same
+    # HEAD 3b0d7cc; C++ links are non-reproducible so the exact bytes differ from the
+    # first v1.9 build) so the shipped rexauto.exe pin == the sha256 of rexglue/tool/*
+    # in the shipped rexglue-sdk-win64.zip. cmake --install refreshed the whole tree.
+    "rexglue.exe":    "f79a3881a47bd6ddfe841c12094fd3dd48c3a1e23620bb76aaa4873ac2da9eea",
+    "rexruntime.dll": "c503f763ab45f55a113503b3d20b0705e1813b19a90bbf0eb35b9864b9465bd8",
 }
 
 
