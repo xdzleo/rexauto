@@ -1,0 +1,13 @@
+# rexauto gabarito — pre-discovered cures for "wwe_smackdown_vs_raw_2007" (6)
+[meta]
+name = "wwe_smackdown_vs_raw_2007"
+xex_sha256 = "bc05cd9bd6c063f59e72024f14f2e50dc55c98457713505e563b08db9aea2e13"
+cures = 6
+
+[functions]
+"0x824625F0" = {}
+"0x82462A00" = {}
+"0x825C1380" = {}
+"0x825C50A8" = {}
+"0x825D0840" = {}
+"0x825E7B78" = {}
