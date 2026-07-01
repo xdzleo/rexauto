@@ -598,8 +598,28 @@ def extract_container(src, out_dir, log=print):
             raise SystemExit("no default.xex in the ISO")
         return xex, out_dir
 
+    # Not an Xbox 360 container. A very common mistake is grabbing the wrong
+    # platform's disc (e.g. the PS3 ISO), so give a specific hint instead of a
+    # cryptic magic when we can recognize an ISO9660 / PlayStation disc.
+    hint = ""
+    try:
+        with open(src, "rb") as _h:
+            _h.seek(0x8001)
+            if _h.read(5) == b"CD001":            # ISO9660 primary volume descriptor
+                _h.seek(0)
+                _scan = _h.read(4 * 1024 * 1024)
+                if b"PS3_GAME" in _scan or b"PS3_DISC.SFB" in _scan or b"EBOOT.BIN" in _scan:
+                    hint = (" -- this is a PlayStation 3 disc (ISO9660 with PS3_GAME/EBOOT.BIN), "
+                            "NOT Xbox 360. rexauto recompiles Xbox 360 (XEX) only; use the Xbox 360 "
+                            "version (its disc has a MICROSOFT*XBOX*MEDIA volume + a default.xex).")
+                else:
+                    hint = (" -- this is an ISO9660 disc, not an Xbox 360 GDFX disc "
+                            "(no MICROSOFT*XBOX*MEDIA volume). rexauto needs the Xbox 360 version.")
+    except OSError:
+        pass
     raise SystemExit(
-        "unsupported container (magic=%r) — not STFS, GoD, ISO, a folder, or a raw XEX." % magic)
+        "unsupported container (magic=%r) -- not STFS, GoD, ISO, a folder, or a raw XEX.%s"
+        % (magic, hint))
 
 
 if __name__ == "__main__":
