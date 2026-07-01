@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.4.1 — "right target, clear signal" (2026-07-01)
+
+Desktop-app (GUI) + extract UX fixes. No pipeline/codegen change; SDK unchanged.
+
+### GUI state reset on target change
+- **Name stuck on the old target.** The name only auto-derived when the field was
+  empty/"game", so after the first target set `name="skate_3"`, picking a new target
+  kept the old name → the new game recompiled into the wrong project dir. A `nameAuto`
+  flag now re-derives the name on every target change until the user types their own.
+- **Cover not reset.** Switching from an STFS package (has an embedded thumbnail) to an
+  ISO (none) left the *previous* game's art on the card. The no-cover branch now clears
+  the stale cover and shows a neutral placeholder (Xbox 360 discs don't embed cover art —
+  it's a marketplace tile, not on the disc; the title still shows below the card).
+
+### Clearer extract error on the wrong disc
+- Feeding a **PlayStation 3** disc (or any non-Xbox ISO9660 image) failed with an opaque
+  `unsupported container (magic=b'\x00\x00\x00\x04')`. extract now probes for an ISO9660
+  PVD + PS3 markers (`PS3_GAME`/`EBOOT.BIN`/`PS3_DISC.SFB`) and says plainly it's a PS3
+  disc and that rexauto needs the Xbox 360 version (a very common mistake with
+  multi-platform games like Skate 3).
+
+### SDK
+- Unchanged (`SDK_PIN` still `95010481` / `0ce11411`); `rexglue-sdk-win64.zip` identical
+  to 2.3.0/2.4.0. Only `rexauto.exe` changed.
+
 ## 2.4.0 — "parse once" (2026-07-01)
 
 Fleet-wide **build-perf** release — the recompile is faster with **zero codegen change**
