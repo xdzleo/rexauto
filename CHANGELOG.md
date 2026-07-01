@@ -1,5 +1,37 @@
 # Changelog
 
+## 2.4.0 — "parse once" (2026-07-01)
+
+Fleet-wide **build-perf** release — the recompile is faster with **zero codegen change**
+(the generated C++ and every title's binary stay byte-identical; the regression gate is
+unaffected because a PCH touches compile speed, not emitted code).
+
+### Precompiled header for the `<name>_init.h` monolith
+- Every generated recomp TU opens with `#include "<name>_init.h"` — a huge header (tens of
+  thousands of `DECLARE_REX_FUNC` externs + heavy C++23 STL; skate3's is 1.56 MB / 48.6k
+  lines). Its front-end parse was a fixed per-TU floor paid once **per TU** (a 24-function
+  TU still cost ~3.7s = pure header parse).
+- rexauto now injects `target_precompile_headers(<name> PRIVATE generated/default/<name>_init.h)`
+  into every port at build time so clang parses it **once**. Idempotent; extra recompiled
+  modules (e.g. skate3's EAWebkit, which include their own init header) are marked
+  `SKIP_PRECOMPILE_HEADERS`. Opt out with `REXAUTO_NO_PCH=1`.
+- **Measured** (skate3, eawebkit as an in-build no-PCH control): default-module per-TU
+  compile **9.9s → 7.83s (~21%)**, small TUs **3.71s → 1.17s (3×)**. Proven on skate3
+  (multi-module) and joust (single-module). Single-module titles — most of the fleet — get
+  the full per-TU cut on the wall-clock (no un-PCH'd module tail).
+- **Output-neutral by construction**: a PCH caches the parsed AST, never the emitted code.
+
+### Profiling note (why this is the lever)
+A 16-agent profile of the real `.ninja_log` found the recompile wall-clock lives in two
+co-dominant ~90s sinks: a compile phase that is **already 16-thread-saturated** (link is a
+negligible ~1s) and a **100%-serial IDA jump-table pass**. So the win is not "more CPU/RAM"
+(compile is maxed; link/IDA don't parallelize) but **cutting redundant work** — hence the
+PCH. Next on the roadmap: caching IDA's `.i64` database (40–175s off every re-run).
+
+### SDK
+- Unchanged from 2.3.0 (`SDK_PIN` still rexglue.exe `95010481` / rexruntime.dll `0ce11411`);
+  `rexglue-sdk-win64.zip` is identical. Only `rexauto.exe` changed (the PCH injection).
+
 ## 2.3.0 — "the Yukes crack" (2026-07-01)
 
 Cracked **WWE SmackDown vs Raw 2007** (Yukes engine, title 545107E0) — it now boots

@@ -783,12 +783,44 @@ def _inject_extra_modules_into_cmake(ctx, mods):
         "        set(_rexauto_saved \"${GENERATED_SOURCES}\")\n"
         "        include(generated/${_rexauto_mod}/sources.cmake)\n"
         "        target_sources(%s PRIVATE ${GENERATED_SOURCES})\n"
+        "        # this module's TUs include their own <mod>_init.h, not the\n"
+        "        # entrypoint's, so they must skip the entrypoint PCH (wrong header).\n"
+        "        set_source_files_properties(${GENERATED_SOURCES} PROPERTIES\n"
+        "            SKIP_PRECOMPILE_HEADERS ON)\n"
         "        target_include_directories(%s PRIVATE\n"
         "            \"${CMAKE_CURRENT_SOURCE_DIR}/generated/${_rexauto_mod}\")\n"
         "        set(GENERATED_SOURCES \"${_rexauto_saved}\")\n"
         "        unset(_rexauto_saved)\n"
         "    endif()\nendforeach()\n" % (keys, ctx.name, ctx.name))
     ctx.log("  wired %d extra module(s) into CMakeLists" % len(mods))
+
+
+def _inject_pch_into_cmake(ctx):
+    """Precompile the entrypoint module's <name>_init.h monolith. Every generated
+    recomp TU opens with `#include "<name>_init.h"` -- a huge header (tens of
+    thousands of DECLARE_REX_FUNC externs + heavy C++ STL) whose front-end parse
+    is otherwise a fixed floor paid once per TU. A PCH parses it ONCE (~20% off
+    per-TU compile, small TUs several x). Output-neutral: a PCH caches the parsed
+    AST, never the emitted code, so the generated C++ and the binary's .text stay
+    byte-identical (codegen gate unaffected). Idempotent; extra modules skip it
+    (they include their own init header). Set REXAUTO_NO_PCH=1 to opt out."""
+    if os.environ.get("REXAUTO_NO_PCH"):
+        return
+    cml = os.path.join(ctx.port, "CMakeLists.txt")
+    if not os.path.exists(cml):
+        return
+    txt = open(cml, encoding="utf-8", errors="ignore").read()
+    if "target_precompile_headers" in txt:   # already present (manual or prior run)
+        return
+    if not os.path.exists(os.path.join(ctx.gen, "%s_init.h" % ctx.name)):
+        return
+    open(cml, "a", encoding="utf-8").write(
+        "\n# rexauto-pch: parse the %s_init.h monolith once, not once per TU\n"
+        "# (build perf; output-neutral -- a PCH caches the AST, not emitted code).\n"
+        "target_precompile_headers(%s PRIVATE\n"
+        "    \"${CMAKE_CURRENT_SOURCE_DIR}/generated/default/%s_init.h\")\n"
+        % (ctx.name, ctx.name, ctx.name))
+    ctx.log("  wired PCH for %s_init.h into CMakeLists" % ctx.name)
 
 
 def _cpp_str(s):
@@ -988,6 +1020,7 @@ def setup_extra_modules(ctx):
     if mods:
         _inject_extra_modules_into_cmake(ctx, mods)
     _inject_app_glue(ctx, mods, glue)
+    _inject_pch_into_cmake(ctx)
 
 
 def stage_build(ctx):
