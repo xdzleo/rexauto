@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.5.0 — "Gears builds" (2026-07-01)
+
+Adds **Gears of War Judgment** — the fleet's largest title (59,396 functions, 124 codegen
+units, XGD3) — as a port that **builds, boots, and converges**, via a small opt-in
+**codegen** SDK change. `rexruntime.dll` is byte-identical, so no game's runtime changes.
+
+- **Root cause:** a hand-written computed-goto routine (`sub_830AFE28`, a stateful
+  decompressor loop) is dispatched by a `bctr` jump table whose landings the heuristic
+  `detectJumpTable` under-recovers — 3 stay dangling `goto loc_T` with no block →
+  permanent `use of undeclared label` stall. Splitting the landings into functions
+  passes the build but severs the loop's back-edge into a runtime `REX_FATAL`; the
+  routine must stay whole.
+- **Fix (SDK, codegen-only):** new `forced_landings = [0x..]` config array. During block
+  discovery, after normal flow, a listed address inside a function that normal control
+  flow did NOT reach is seeded as an in-function block — its `loc_` label is emitted and
+  the routine stays one whole function. Empty list ⇒ seed inert ⇒ **byte-identical**.
+- **Fix (rexauto, self-healing):** the undeclared-label heal now writes the exact
+  landing addresses to `<game>_forced_landings.toml`, wires it into the manifest, and
+  re-codegens — converging any title with this defect, no per-game hack.
+- **Zero regression, proven:** codegen byte-identical across all 10 baselined fleet games
+  (`regression_gate.py`); Gears builds → 91 MB exe → boots → run-heal converges with no
+  invalid-function FATAL (the decompressor runs — the split approach would have crashed).
+  SDK: `rexglue.exe` new codegen pin; `rexruntime.dll` unchanged (`0ce11411`).
+
 ## 2.4.2 — "cover art" (2026-07-01)
 
 Cover art for **ISO / GoD / folder** targets in the desktop app. Xbox 360 discs don't

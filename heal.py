@@ -166,6 +166,56 @@ def heal_boundaries(build_log, gen_dir, toml_path):
     return added
 
 
+def forced_landings_from_log(build_log):
+    """Landing addresses from every "use of undeclared label 'loc_T'" compile error.
+    A dangling goto is, by definition, an in-function jump-table landing the SDK's
+    heuristic detectJumpTable under-recovered (an InternalLabel target with no block) --
+    never a separate function -- so forcing the SDK to recover it as an in-function block
+    is the safe, function-preserving fix (keeps a decompressor loop's back-edge intact)."""
+    txt = _read_text(build_log)
+    return sorted(set(int(m.group(3), 16) for m in UNDECL.finditer(txt)))
+
+
+def load_forced(path):
+    """Set of addresses in a `forced_landings = [..]` TOML (empty if absent)."""
+    if not os.path.exists(path):
+        return set()
+    m = re.search(r"forced_landings\s*=\s*\[([^\]]*)\]", _read_text(path))
+    return set(int(x, 16) for x in re.findall(r"0x[0-9A-Fa-f]+", m.group(1))) if m else set()
+
+
+def write_forced(path, addrs):
+    """Merge addrs into the forced_landings TOML. Returns count newly added (0 => no
+    change, so the file stays byte-identical on disk)."""
+    cur = load_forced(path)
+    merged = cur | set(addrs)
+    if merged == cur and os.path.exists(path):
+        return 0
+    body = ", ".join("0x%08X" % a for a in sorted(merged))
+    open(path, "w").write(
+        "# Jump-table landings the heuristic detectJumpTable under-recovered -- forced to\n"
+        "# be recovered as in-function blocks so build_bctr's `goto loc_T` resolves and the\n"
+        "# enclosing routine stays whole. Auto-written by rexauto's undeclared-label heal.\n"
+        "forced_landings = [%s]\n" % body)
+    return len(merged) - len(cur)
+
+
+def ensure_manifest_include(manifest_path, include_name):
+    """Add include_name to the manifest's `includes = [..]` array if missing (idempotent)."""
+    if not os.path.exists(manifest_path):
+        return
+    txt = _read_text(manifest_path)
+    if include_name in txt:
+        return
+    m = re.search(r"(includes\s*=\s*\[)([^\]]*)(\])", txt)
+    if not m:
+        return
+    items = m.group(2).rstrip()
+    sep = ", " if items.strip() else ""
+    new = m.group(1) + items + '%s"%s"' % (sep, include_name) + m.group(3)
+    open(manifest_path, "w").write(txt[:m.start()] + new + txt[m.end():])
+
+
 def invalid_functions_from_text(txt):
     """Distinct guest addresses the dispatcher flagged as unregistered."""
     return sorted(set(int(m.group(1), 16) for m in INVALID.finditer(txt)))

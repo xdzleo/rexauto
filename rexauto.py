@@ -109,6 +109,7 @@ class Ctx:
         self.manifest = os.path.join(self.port, "%s_manifest.toml" % self.name)
         self.functions = os.path.join(self.port, "%s_functions.toml" % self.name)
         self.switches = os.path.join(self.port, "%s_switch_tables.toml" % self.name)
+        self.forced = os.path.join(self.port, "%s_forced_landings.toml" % self.name)
         self.builddir = os.path.join(self.port, "out", "build", "win-amd64-release")
         self.exe = os.path.join(self.builddir, "%s.exe" % self.name)
         self.gen = os.path.join(self.port, "generated", "default")
@@ -1043,13 +1044,24 @@ def stage_build(ctx):
             ctx.log("build OK -> %s" % ctx.exe)
             return ctx.mark("build", {"exe": ctx.exe})
         if "use of undeclared label" in txt:
-            n = _heal.heal_boundaries(logp, ctx.gen, ctx.functions)
+            # Two undeclared-label classes: (a) a jump-table landing the SDK's heuristic
+            # under-recovered -> force the SDK to recover it as an in-function block
+            # (keeps the routine whole, e.g. Gears' decompressor loop); (b) a genuine
+            # mid-flow function split -> extend the owning function's end. Apply both;
+            # they partition the case space, so this converges either kind.
+            landings = _heal.forced_landings_from_log(logp)
+            nf = _heal.write_forced(ctx.forced, landings)
+            if nf:
+                _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
+            nb = _heal.heal_boundaries(logp, ctx.gen, ctx.functions)
             ends = tuple(sorted((a, e) for a, e in _heal.load_overrides(ctx.functions).items() if e))
-            if n == 0 or ends == last_ends:
-                ctx.log("  boundary heal not converging (no new fix) -> see %s" % logp)
+            state = (tuple(sorted(_heal.load_forced(ctx.forced))), ends)
+            if (nf + nb) == 0 or state == last_ends:
+                ctx.log("  undeclared-label heal not converging (no new fix) -> see %s" % logp)
                 break
-            last_ends = ends
-            ctx.log("  boundary split -> +%d function-end extension(s); rebuilding" % n)
+            last_ends = state
+            ctx.log("  jump-table landing heal -> +%d forced landing(s), +%d boundary fix(es); rebuilding"
+                    % (nf, nb))
             continue
         imports = sorted(set(re.findall(r"undefined symbol:[^\n]*?_([A-Za-z]\w+)", txt)))
         if imports:
@@ -1141,6 +1153,8 @@ def stage_runheal(ctx):
         logp, rc = do_build(ctx, bat)
         if rc != 0 or not os.path.exists(ctx.exe):
             if "use of undeclared label" in _heal._read_text(logp):
+                if _heal.write_forced(ctx.forced, _heal.forced_landings_from_log(logp)):
+                    _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
                 _heal.heal_boundaries(logp, ctx.gen, ctx.functions)
                 do_codegen(ctx)
                 do_build(ctx, bat)
@@ -1182,6 +1196,8 @@ def stage_runheal(ctx):
         logp, rc = do_build(ctx, bat)
         if rc != 0 or not os.path.exists(ctx.exe):
             if "use of undeclared label" in _heal._read_text(logp):
+                if _heal.write_forced(ctx.forced, _heal.forced_landings_from_log(logp)):
+                    _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
                 _heal.heal_boundaries(logp, ctx.gen, ctx.functions)
                 do_codegen(ctx)
                 do_build(ctx, bat)
@@ -1234,7 +1250,15 @@ SDK_PIN = {
     # (1) FPSCR host-thread MXCSR mask leak -> no more spurious STATUS_FLOAT_INEXACT_RESULT
     # on host-thread guest dispatch (fleet-wide); (2) writable cache: VFS mount; (3) xenia
     # ranged-alloc offset. Codegen untouched -> gate 10/10 byte-identical + skate3 runtime PASS.
-    "rexglue.exe":    "95010481d950390f4230317aafdfbadd59e17ad74189b5e2e5228724151e4301",
+    # v2.1 (Gears of War Judgment): CODEGEN-ONLY fix -- discoverBlocks now seeds the
+    # IDA-recovered config switch_tables targets as in-function blocks (function_scanner.cpp
+    # /.h + phase_discover.cpp), so a hand-written computed-goto routine the SDK's heuristic
+    # detectJumpTable under-recovers (Gears sub_830AFE28, a stateful decompressor loop) emits
+    # loc_ for ALL its landings and stays ONE function -- its shared-tail loop-back stays intra-
+    # function (splitting the landings would sever it -> runtime FATAL). Inert where discovery
+    # was already complete (visited/blockStarts guard) -> fleet codegen byte-identical. rexruntime
+    # UNCHANGED (0ce11411; the runtime links no codegen) -> zero runtime-behavior change fleet-wide.
+    "rexglue.exe":    "06b932444f9a4590d265a1714ac3d906d73874d65f5f53fba3bed5f840711e29",
     "rexruntime.dll": "0ce11411e435dd6ef4428e8b33d82561de6741be825b10d969fe907a767fe94b",
 }
 
