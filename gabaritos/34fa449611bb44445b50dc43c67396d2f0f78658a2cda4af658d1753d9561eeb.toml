@@ -1,0 +1,21 @@
+# rexauto gabarito — pre-discovered cures for "gears_of_war_judgment" (14)
+[meta]
+name = "gears_of_war_judgment"
+xex_sha256 = "34fa449611bb44445b50dc43c67396d2f0f78658a2cda4af658d1753d9561eeb"
+cures = 14
+
+[functions]
+"0x823E16A8" = {}
+"0x8245DE40" = {}
+"0x8273F1B0" = {}
+"0x82C073D0" = {}
+"0x82C0CC58" = {}
+"0x82DD9C20" = {}
+"0x82E06E90" = {}
+"0x82E44408" = {}
+"0x82E88BD8" = {}
+"0x82E9EAA8" = {}
+"0x830AFE28" = { end = 0x830B0F80 }
+"0x830B0864" = {}
+"0x830B09E4" = {}
+"0x830B0BB0" = {}
