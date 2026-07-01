@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.1.0 — "the long-tail, closed" (2026-06-30)
+
+Closes the one open item from 2.0.0: the **switch-on-ctr heal long-tail** that made
+sustained Skate 3 play crash non-deterministically (~85s in, at guest `0x82E57160`).
+Our fork's `build_bctr` lowers each recovered jump table as `switch (ctx.ctr.u32)` with a
+`case 0xTARGET:` per landing; a landing that isn't a registered function/chunk falls back
+to `REX_CALL_INDIRECT_FUNC`, which FATALs at runtime if that guest address isn't in the
+function table. The community build sidesteps this by lowering switches on an *index*
+(inline `goto`), so it never needs the landings registered — we do.
+
+### Headline
+- **New pipeline stage `jt_landings`** (`jt_landings.py`, wired into `do_codegen`): after a
+  clean codegen it scans the generated tree for every `case 0xT:` that still dispatches
+  indirectly, and registers each as a **chained, contiguous chunk** of its enclosing
+  function (`end(i)=start(i+1)`, `parent` chained). `classifyTarget` then treats each `case`
+  target as a real entry, so `build_bctr` emits a direct `sub_T(...)` call instead of the
+  indirect FATAL. A re-codegen converges (the second pass finds none). Fully generic —
+  detects the landings of *any* function from the SDK's own table recovery; no IDA pass.
+- **Skate 3 now plays sustained**: the 52 residual landings (`0x8270B3D0`×6, `0x829A9280`×5,
+  `0x82E56878`×41 incl. the `0x82E57160` crasher) register automatically. Validated **alive
+  after 300s (5 min), 0 FATAL, the crasher gone**. Ours is now equal-or-better than the
+  community build for sustained play, from the pipeline, with no per-title hand editing.
+
+### Safety / zero-regression
+- **No-op for titles whose switches already resolve** (`heal()` returns 0) → codegen stays
+  **byte-identical** for the other 9 fleet titles (verified: none have unregistered
+  landings). The stage only ever *adds* chunks for genuinely-unregistered landings.
+- **Gabarito-seeded configs are safe**: chunks are inserted at the end of the `[functions]`
+  table regardless of whether `[meta]` leads (gabarito) or trails (plain port) it, so a
+  fresh "clone and re-run" reproduces the playable build (seed → codegen → heal → converge).
+- **Idempotent**: re-running against an already-healed config detects 0 and leaves the file
+  byte-identical.
+
 ## 2.0.0 — "skate 3 born playable" (2026-06-30)
 
 The release where the rexauto pipeline produces a **playable Skate 3** from an Xbox 360

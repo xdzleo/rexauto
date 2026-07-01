@@ -42,6 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import extract as _extract
 import heal as _heal
+import jt_landings as _jt
 
 STAGES = ["extract", "init", "setjmp", "jumptables", "build", "runheal", "run"]
 MAX_BUILD_ATTEMPTS = 12
@@ -455,6 +456,11 @@ def do_codegen(ctx, env=None, level="error"):
         r = rexglue(ctx, "--log-level", level, "codegen", ctx.manifest, env=env, capture=True)
         out = (r.stdout or "") + (r.stderr or "")
         if r.returncode == 0:
+            # heal unregistered bctr switch-on-ctr landings the SDK left as an
+            # indirect dispatch (would FATAL at runtime); a re-codegen converges
+            # them. No-op (returns 0) for a title whose switches all resolve.
+            if _jt.heal(ctx, log=ctx.log):
+                continue
             _gen_restore_unchanged(ctx, snap)
             return out
         targets = _heal.unresolved_calls_from_text(out)
