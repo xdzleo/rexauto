@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.7.0 — "cure once" (2026-07-02)
+
+Static function/vtable recovery is now a **pipeline stage** — a game's "invalid
+function" cures are found up front from ONE deep IDA pass instead of by launching the
+game N times, so run-heal is left as a rare backstop. Directly targets the "I keep
+re-curing every game in runtime" pain. **rexauto-only; SDK unchanged** (`rexglue.exe`
+`06b93244`, `rexruntime.dll` `4e75b494`; `deep_extract.py` already in the bundled
+xenon-jumptables).
+
+- **New `deepextract` stage** (`extract → init → setjmp → jumptables → deepextract →
+  build → runheal → run`): reuses the `.i64` the jumptables stage already produced
+  (copied, never the original), runs a deep IDA pass (funcmap ∪ vtable data-xref) to
+  harvest the function/vtable-target set the linear scan misses — ~96% of what run-heal
+  otherwise discovers dynamically.
+- **The pure-addition gate** (`deepextract.py`): a candidate is folded in ONLY if adding
+  it is a pure addition — it codegens to its OWN new function with a real (non-stub)
+  body, introduces no dangling `goto` (a split), and changes no pre-existing function's
+  body. Inspects the ACTUAL codegen output, so it structurally forbids the crash-mask (a
+  return-only stub that would turn a real "invalid function" abort into a silent return).
+- **run-heal kept as the backstop** for the genuinely-dynamic residue (~4%).
+- Proven on joust: 282 candidates → gate accepts 67 (drops 215 as swallow/stub/split) →
+  builds + boots + survives 47s, run-heal a no-op (`discover round 1: 0 new`). The wall
+  `0x823010C8` (a live vtable-dispatch crash) is cured statically, before the game runs.
+- Opt-in on IDA (no idat / no `.i64` → skip → byte-identical), fully additive
+  (superset-only `{}`). Zero regression: codegen byte-identical across the fleet.
+
 ## 2.6.0 — "Gears boots" (2026-07-01)
 
 A one-line **runtime** fix (found by a multi-agent IDA-Pro diagnosis) makes Gears of

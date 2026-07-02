@@ -44,8 +44,9 @@ import extract as _extract
 import heal as _heal
 import jt_landings as _jt
 import codegen_patches as _cgp
+import deepextract as _dx
 
-STAGES = ["extract", "init", "setjmp", "jumptables", "build", "runheal", "run"]
+STAGES = ["extract", "init", "setjmp", "jumptables", "deepextract", "build", "runheal", "run"]
 MAX_BUILD_ATTEMPTS = 12
 
 
@@ -1024,6 +1025,58 @@ def setup_extra_modules(ctx):
     _inject_pch_into_cmake(ctx)
 
 
+def stage_deepextract(ctx):
+    """Static function/vtable recovery: a deep IDA pass on the .i64 the jumptables stage
+    produced harvests the function/vtable-target set the linear scan misses (~96% of what
+    run-heal would otherwise find by launching the game N times), and the pure-addition
+    gate folds only the provably-safe ones into functions.toml BEFORE the first build.
+    run-heal stays as the backstop for the genuinely-dynamic residue. Fully additive and
+    opt-in on IDA: no idat / no .i64 -> skip (byte-identical to before)."""
+    if not (ctx.env.get("idat") and ctx.env.get("jt_repo") and ctx.env.get("python")):
+        ctx.log("deep-extract: no IDA/repo/python -> skip (run-heal covers it)")
+        return ctx.mark("deepextract", {"skipped": "no-ida"})
+    i64 = os.path.join(ctx.work, "%s_image.bin.elf.i64" % ctx.name)
+    script = os.path.join(ctx.env["jt_repo"], "src", "deep_extract.py")
+    ranges = _dx.read_ranges(ctx.gen, ctx.name)
+    if not os.path.exists(i64) or not os.path.exists(script) or not ranges:
+        ctx.log("deep-extract: no .i64/script/ranges -> skip (run-heal covers it)")
+        return ctx.mark("deepextract", {"skipped": "no-i64-or-ranges"})
+    ib, cb, cs, isz = ranges
+    funclist = os.path.join(ctx.work, "%s_functions_list.txt" % ctx.name)
+    workcopy = os.path.join(ctx.work, "%s_deepx.i64" % ctx.name)  # NEVER open the original
+    cfg = os.path.join(ctx.work, "%s_deepx_cfg.json" % ctx.name)
+    outjson = os.path.join(ctx.work, "%s_deepx.json" % ctx.name)
+    outtoml = os.path.join(ctx.work, "%s_deepx.toml" % ctx.name)
+    shutil.copyfile(i64, workcopy)
+    p = lambda x: x.replace("\\", "/")
+    json.dump({"image_base": ib, "text_start": cb, "text_end": cb + cs, "image_end": ib + isz,
+               "known": p(funclist), "out_toml": p(outtoml), "out_json": p(outjson)},
+              open(cfg, "w"))
+    ctx.log("deep IDA extraction (funcmap + vtable data-xref) on a .i64 copy")
+    if os.path.exists(outjson):
+        os.remove(outjson)
+    run([ctx.env["idat"], "-A", "-S%s %s" % (p(script), p(cfg)),
+         "-L" + p(os.path.join(ctx.work, "%s_deepx_ida.log" % ctx.name)), workcopy])
+    if not os.path.exists(outjson):
+        ctx.log("deep-extract: IDA produced nothing -> skip")
+        return ctx.mark("deepextract", {"skipped": "extract-empty"})
+    cands = sorted(set(int(x["addr"], 16) for x in json.load(open(outjson)).get("emitted", []))
+                   - set(_heal.load_overrides_full(ctx.functions)))
+    if not cands:
+        return ctx.mark("deepextract", {"candidates": 0, "accepted": 0})
+    ctx.log("deep-extract: %d candidates -> pure-addition gate" % len(cands))
+    accepted = _dx.pure_add_gate(
+        ctx.env["rexglue"], ctx.port, ctx.name, ctx.manifest, ctx.gen, ctx.functions, cands,
+        codegen_fn=lambda: rexglue(ctx, "--log-level", "error", "codegen", ctx.manifest,
+                                   capture=True),
+        log=ctx.log)
+    if accepted:
+        _heal.register_functions(accepted, ctx.functions)  # additive {} superset-only
+    ctx.log("deep-extract: +%d functions folded (pure additions); %d dropped, run-heal backstops the rest"
+            % (len(accepted), len(cands) - len(accepted)))
+    return ctx.mark("deepextract", {"candidates": len(cands), "accepted": len(accepted)})
+
+
 def stage_build(ctx):
     miss = [k for k in ("vcvars", "clang", "clangxx", "sdk") if not ctx.env[k]]
     if miss:
@@ -1436,8 +1489,8 @@ def main():
 
     state = ctx.load_state()
     fns = {"extract": stage_extract, "init": stage_init, "setjmp": stage_setjmp,
-           "jumptables": stage_jumptables, "build": stage_build, "runheal": stage_runheal,
-           "run": stage_run}
+           "jumptables": stage_jumptables, "deepextract": stage_deepextract,
+           "build": stage_build, "runheal": stage_runheal, "run": stage_run}
     start = order.index(args.from_stage) if args.from_stage else 0
     selected = [args.only] if args.only else order[start:]
 
