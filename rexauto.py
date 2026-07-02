@@ -1466,8 +1466,19 @@ SDK_PIN = {
     # function (splitting the landings would sever it -> runtime FATAL). Inert where discovery
     # was already complete (visited/blockStarts guard) -> fleet codegen byte-identical. rexruntime
     # UNCHANGED (0ce11411; the runtime links no codegen) -> zero runtime-behavior change fleet-wide.
+    # v2.9 (guest fibers): RUNTIME-ONLY -- XThread::Reenter + reenter_exception (same
+    # mechanism as mainline xenia): KeSetCurrentStackPointers on a fiber'd thread
+    # (X_KTHREAD::fiber_ptr set) unwinds the host stack to XThread::Execute and
+    # re-enters guest code at the new fiber's LR; the Execute loop resolves reentry
+    # addresses via ResolveIndirectFunction so mid-function resume sites flow into
+    # the standard heal machinery. Gated on fiber_ptr: titles that never fiber-switch
+    # (the whole pre-Korra fleet) never take the path -> runtime spot-check PASS.
+    # Required by the PlatinumGames digital titles (Korra 58411447 proved live:
+    # dead-at-boot -> engine up, 20 threads, input polling, rendering), Halo 3/
+    # Reach/4, Forza 2 (xenia label kernel-KeSetCurrentStackPointers, 15 titles).
+    # rexglue.exe UNCHANGED -> codegen byte-identical fleet-wide (gate all-blessed PASS).
     "rexglue.exe":    "06b932444f9a4590d265a1714ac3d906d73874d65f5f53fba3bed5f840711e29",
-    "rexruntime.dll": "4e75b494db3d8206768061a02de7491ed9f16b6773c77d50cc0890888185c78c",
+    "rexruntime.dll": "20aec5ac8891d842767645e7493fa183cb215df559d137dbeb253913913265ad",
 }
 
 

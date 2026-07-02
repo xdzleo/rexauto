@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.9.0 — "fibers" (2026-07-02)
+
+Guest fiber support in the runtime + truncated-container guards in the pipeline.
+**SDK runtime changed** (`rexruntime.dll` → `20aec5ac`, `rexglue.exe` unchanged
+`06b93244` ⇒ codegen byte-identical fleet-wide; gate all-blessed PASS + runtime
+spot-checks).
+
+- **Guest fibers (SDK runtime):** `XThread::Reenter` + `reenter_exception`, and
+  `KeSetCurrentStackPointers` now unwinds the host stack back to `XThread::Execute`
+  and re-enters guest code at the new fiber's LR when the guest swaps fibers — the
+  exact mechanism mainline Xenia uses. Reentry addresses (often MID-function: the
+  fiber's own `bl SwapContext` return site) resolve via `ResolveIndirectFunction`,
+  so unregistered sites flow into the standard run-heal machinery instead of
+  silently ending the thread. Gated on `X_KTHREAD::fiber_ptr`: titles that never
+  fiber-switch (the entire pre-Korra fleet) never take the new path. Unlocks the
+  PlatinumGames digital titles (Korra/Transformers Devastation/TMNT) and the
+  Halo 3/Reach/4 + Forza 2 class (xenia-project label
+  kernel-KeSetCurrentStackPointers, 15 titles). Proven live on Korra (58411447):
+  dead-at-boot → engine fully up (~20 guest worker threads, input polling, XMA
+  audio, real render pipeline; shader storage 6→8).
+- **Truncated-container guards (extract):** an incomplete download extracts
+  SILENTLY broken — `Stfs.read_chain` reads past-EOF blocks as empty, so a
+  truncated STFS yields short/0-byte files that later surface as unexplainable
+  runtime behavior. extract now audits every written file against its table
+  length and FAILS with the file list + "re-download" hint; a folder source gets
+  a 0-byte-file audit with a loud warning. This exact class cost an hours-long
+  hunt on Korra: the final wall was a 0-byte `Nickelodeon.usm` intro movie from a
+  truncated `.zip.part` download — the game opens it, our kernel honestly reports
+  size 0, CRI Mana errors, and the title black-screens forever. Recompilation and
+  runtime were correct end-to-end (proven by instrumenting every link of the
+  chain: wrapper status poll → Mana internal state → CriFs GetFileSize →
+  GetFileSizeEx → NtQueryInformationFile(class 34) → VFS → the file really is 0
+  bytes on disk).
+
 ## 2.8.0 — "launch once" (2026-07-02)
 
 Verification stops re-launching the game. A cured title now launches **twice ever**

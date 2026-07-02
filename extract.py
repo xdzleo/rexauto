@@ -636,6 +636,27 @@ def extract_container(src, out_dir, log=print):
         if not xex:
             raise SystemExit("folder has no default.xex: %s" % src)
         log("using extracted game folder in place: %s" % src)
+        # A hand-extracted folder can silently carry the scars of a truncated
+        # download (7z & friends extract what they can from a cut-off archive and
+        # leave 0-byte files). Korra's boot hang cost hours before the wall turned
+        # out to be a 0-byte intro movie -- surface it up front instead.
+        empties = []
+        for root, _dirs, names in os.walk(src):
+            for n in names:
+                p = os.path.join(root, n)
+                try:
+                    if os.path.getsize(p) == 0:
+                        empties.append(os.path.relpath(p, src))
+                except OSError:
+                    pass
+        if empties:
+            log("WARNING: %d empty (0-byte) file(s) in the game folder -- if the "
+                "source archive was an incomplete download, the game WILL misbehave "
+                "(e.g. hang at boot playing a 0-byte movie):" % len(empties))
+            for rel in empties[:8]:
+                log("  0 bytes: %s" % rel)
+            if len(empties) > 8:
+                log("  ... +%d more" % (len(empties) - 8))
         return xex, os.path.dirname(xex)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -665,6 +686,7 @@ def extract_container(src, out_dir, log=print):
         log("STFS %s: %d files" % (magic.decode("ascii", "ignore").strip(), len(files)))
         xex = None
         written = 0
+        short_files = []
         for i, e in files:
             rel = Stfs.rel_path(ents, i)
             dst = os.path.normpath(os.path.join(out_dir, rel))
@@ -674,12 +696,27 @@ def extract_container(src, out_dir, log=print):
                 continue
             if not (os.path.exists(dst) and os.path.getsize(dst) == e["length"]):
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
+                # read_chain reads past-EOF blocks as empty, so a TRUNCATED package
+                # (incomplete download) silently yields short/0-byte files -- the
+                # kind that later costs hours as a mystery boot hang. Audit it here.
+                data = s.read_chain(e["start"], e["length"], e["contiguous"])
                 with open(dst, "wb") as o:
-                    o.write(s.read_chain(e["start"], e["length"], e["contiguous"]))
-                written += e["length"]
+                    o.write(data)
+                written += len(data)
+                if len(data) != e["length"]:
+                    short_files.append((rel, e["length"], len(data)))
             if e["name"].lower() == "default.xex":
                 xex = dst
         log("extracted assets (%.1f MB written) -> %s" % (written / 1024 / 1024, out_dir))
+        if short_files:
+            for rel, want, got in short_files[:8]:
+                log("  TRUNCATED: %s (expected %d bytes, got %d)" % (rel, want, got))
+            if len(short_files) > 8:
+                log("  ... +%d more" % (len(short_files) - 8))
+            raise SystemExit(
+                "[extract] %d file(s) came out short/empty -- the STFS container is "
+                "TRUNCATED (incomplete download?). Re-download the package and re-run."
+                % len(short_files))
         if not xex:
             xex = _find_default_xex(out_dir)
         if not xex:
