@@ -105,6 +105,7 @@ def pure_add_gate(rexglue, port, name, manifest, gen, functions_toml, candidates
     RESTORES functions.toml (the caller applies the accepted set)."""
     bak = functions_toml + ".deepx.bak"
     shutil.copyfile(functions_toml, bak)
+    codegened = None   # the `accepted` set the current generated/ reflects (skip redundant passes)
     try:
         codegen_fn()
         base = func_bodies(gen, name)
@@ -114,6 +115,7 @@ def pure_add_gate(rexglue, port, name, manifest, gen, functions_toml, candidates
             shutil.copyfile(bak, functions_toml)
             _write_candidates(functions_toml, accepted)
             codegen_fn()
+            codegened = frozenset(accepted)
             new = func_bodies(gen, name)
             new_heads = set(new) - set(base)
             drop = set(a for a in accepted if a not in new_heads)          # swallowed
@@ -135,18 +137,26 @@ def pure_add_gate(rexglue, port, name, manifest, gen, functions_toml, candidates
                 break
             log("  pure-add gate: dropping %d unsafe (swallow/stub/split); re-checking" % len(drop))
             accepted -= drop
-        # final safety assertion on the accepted set
-        shutil.copyfile(bak, functions_toml)
-        _write_candidates(functions_toml, accepted)
-        codegen_fn()
+        # Final safety assertion on the accepted set. When the loop broke via
+        # `not drop`, generated/ ALREADY reflects `accepted` (the last loop pass
+        # codegen'd exactly this set) -- re-codegen'ing it is pure waste. Only
+        # re-run when the set changed since the last pass (loop exhausted 6 iters
+        # and shrank accepted after its final codegen). (audit: SAFE-BYTE-IDENTICAL)
+        if codegened != frozenset(accepted):
+            shutil.copyfile(bak, functions_toml)
+            _write_candidates(functions_toml, accepted)
+            codegen_fn()
         if count_dangling(gen, name) != 0:
             log("  pure-add gate: residual dangling goto after gating -> REJECT ALL (unsafe)")
             return []
         return sorted(accepted)
     finally:
+        # Restore functions.toml; the CALLER re-applies the accepted set. No restore
+        # codegen: stage_build always re-runs do_codegen from the authoritative toml
+        # before any compile (_gen_restore_unchanged md5-keeps byte-identical files),
+        # so a restore pass here only re-does work stage_build redoes. (audit: SAFE)
         shutil.copyfile(bak, functions_toml)
         try:
             os.remove(bak)
         except OSError:
             pass
-        codegen_fn()

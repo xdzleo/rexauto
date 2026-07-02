@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.10.0 — "build fast" (2026-07-02)
+
+Pipeline speed, all byte-identical output. **rexauto-only; SDK unchanged**
+(`rexglue.exe` `06b93244`, `rexruntime.dll` `20aec5ac`). Every change is
+output-neutral by construction and proven by the regression gate (codegen
+byte-identical fleet-wide) plus targeted empirical checks. Driven by an 18-agent
+codegen-engine audit that measured where the time actually goes.
+
+- **Heal loop 70s → 6s (11×), measured on GTA San Andreas.** Two build-flag
+  fixes: (1) **PCH resurrected** — the v2.4.0 precompiled-header win had silently
+  regressed (the injection ran before `<name>_init.h` existed, so its exists()
+  guard skipped it; a fleet audit found 1/18 ports actually had the PCH). Now
+  wired after codegen, idempotent. (2) **`-gline-tables-only`** on RelWithDebInfo:
+  keep function symbols + line tables (cdb guest stacks still resolve) and drop
+  the variable/type debug info that bloated the PDB (~100MB → ~63MB) and dominated
+  every relink. Both output-neutral (PCH caches the AST, debug flag is debug-info
+  only) — `.text` stays byte-identical.
+- **Global IDA cache.** The jump-table IDA pass — the pipeline's one serial
+  single-core minutes-long sink — is fully determined by the image bytes. Keyed
+  by sha256(image) + section ranges + xenon-jumptables rev; a re-port of the same
+  game (or a wiped work dir) copies the cached switch_tables.toml + .i64 instead
+  of re-analyzing (GTA SA: 2min5s → instant; the .i64 reuse also speeds
+  deep-extract). `REXAUTO_NO_IDA_CACHE=1` to disable.
+- **setjmp/jumptables image-dump merge.** The setjmp stage ran a FULL codegen
+  purely to dump the guest image, which the jumptables stage then re-dumped
+  identically. The image dump is the raw decompressed sections
+  (project_recompiler.cpp:251), independent of setjmp/functions.toml — proven
+  byte-identical across two dumps. jumptables now reuses the setjmp stage's image
+  + ranges: **−1 full codegen per port** (GTA SA ~46s, GTA V ~4min).
+- **pure-add gate: fewer codegen passes.** deep-extract's pure-add gate re-ran a
+  full codegen to restore generated/ (thrown away — stage_build re-materializes it
+  from the authoritative toml) and a redundant final safety pass when the loop had
+  already converged. Both dropped; the accepted set (the only thing that reaches
+  functions.toml) is unchanged. GTA V's ~14min gate roughly halves.
+
+Audit also mapped the SDK-side wins (parallelize the Discover/GapFill worklist to
+use all cores, GapFill decode-once) — those need an SDK change + pin bump and land
+in a later release, gated the same way.
+
 ## 2.9.0 — "fibers" (2026-07-02)
 
 Guest fiber support in the runtime + truncated-container guards in the pipeline.

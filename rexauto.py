@@ -283,12 +283,22 @@ def stage_setjmp(ctx):
         return ctx.mark("setjmp", {"skipped": "no-dump"})
     bm = re.search(r"base=0x([0-9A-Fa-f]+), size=0x([0-9A-Fa-f]+)", blob)
     base = int(bm.group(1), 16) if bm else 0x82000000
+    image_end = base + (int(bm.group(2), 16) if bm else 0x900000)
     secs = re.findall(r"section '([^']+)' at 0x([0-9A-Fa-f]+) size 0x([0-9A-Fa-f]+) exec=(\w+)", blob)
     exec_secs = [(int(a, 16), int(a, 16) + int(sz, 16))
                  for _, a, sz, ex in secs if ex.lower() in ("true", "1")]
     if not exec_secs:
         ctx.log("could not parse exec sections -> skipping setjmp detection")
         return ctx.mark("setjmp", {"skipped": "no-sections"})
+    # Hand the freshly-dumped image + parsed ranges to the jumptables stage, which
+    # runs immediately after and would otherwise re-run an IDENTICAL image-dump
+    # codegen (~46s on GTA-SA, ~4min on GTA V) purely to reproduce this same file.
+    # The image dump is the raw decompressed sections (project_recompiler.cpp:251),
+    # independent of setjmp/functions.toml, so it is byte-identical between the two
+    # stages -- reuse is safe. Only set when running in-process this session; a
+    # `--from jumptables` run has no stash and re-dumps as before.
+    ctx._jt_image = {"image": image, "base": base, "image_end": image_end,
+                     "exec_secs": exec_secs}
     try:
         res = _dj.detect(image, exec_secs, base)
     except Exception as ex:
@@ -320,26 +330,34 @@ def stage_jumptables(ctx):
         ctx.log("no python interpreter for the jump-table scripts -> skipping (set PYTHON)")
         return ctx.mark("jumptables", {"skipped": "no-python"})
     image = os.path.join(ctx.work, "%s_image.bin" % ctx.name)
-    ctx.log("dumping decompressed image + reading section ranges")
-    try:
-        blob = do_codegen(ctx, env={"REX_DUMP_IMAGE": image}, level="trace")
-    except SystemExit as ex:
-        ctx.log("codegen (for image dump) failed -> skipping jump tables (%s)" % ex)
-        return ctx.mark("jumptables", {"skipped": "codegen-fail"})
-    if not os.path.exists(image):
-        ctx.log("image dump produced nothing (rexglue likely lacks the dump-image patch) "
-                "-> skipping jump tables")
-        return ctx.mark("jumptables", {"skipped": "no-dump"})
-    bm = re.search(r"base=0x([0-9A-Fa-f]+), size=0x([0-9A-Fa-f]+)", blob)
-    base = int(bm.group(1), 16) if bm else 0x82000000
-    image_end = base + (int(bm.group(2), 16) if bm else 0x900000)
-    secs = re.findall(r"section '([^']+)' at 0x([0-9A-Fa-f]+) size 0x([0-9A-Fa-f]+) exec=(\w+)", blob)
-    exec_secs = [(int(a, 16), int(a, 16) + int(sz, 16))
-                 for _, a, sz, ex in secs if ex.lower() in ("true", "1")]
-    if not exec_secs:
-        ctx.log("WARNING: could not parse exec sections from the rexglue trace (log format may "
-                "have changed) -> skipping jump tables")
-        return ctx.mark("jumptables", {"skipped": "no-sections"})
+    reuse = getattr(ctx, "_jt_image", None)
+    if reuse and reuse.get("image") == image and os.path.exists(image):
+        # The setjmp stage (which ran this same session) already produced this exact
+        # image + ranges from an identical codegen. Skip the redundant re-dump.
+        ctx.log("reusing image + section ranges from the setjmp stage "
+                "(identical codegen; skipping the redundant image-dump pass)")
+        base, image_end, exec_secs = reuse["base"], reuse["image_end"], reuse["exec_secs"]
+    else:
+        ctx.log("dumping decompressed image + reading section ranges")
+        try:
+            blob = do_codegen(ctx, env={"REX_DUMP_IMAGE": image}, level="trace")
+        except SystemExit as ex:
+            ctx.log("codegen (for image dump) failed -> skipping jump tables (%s)" % ex)
+            return ctx.mark("jumptables", {"skipped": "codegen-fail"})
+        if not os.path.exists(image):
+            ctx.log("image dump produced nothing (rexglue likely lacks the dump-image patch) "
+                    "-> skipping jump tables")
+            return ctx.mark("jumptables", {"skipped": "no-dump"})
+        bm = re.search(r"base=0x([0-9A-Fa-f]+), size=0x([0-9A-Fa-f]+)", blob)
+        base = int(bm.group(1), 16) if bm else 0x82000000
+        image_end = base + (int(bm.group(2), 16) if bm else 0x900000)
+        secs = re.findall(r"section '([^']+)' at 0x([0-9A-Fa-f]+) size 0x([0-9A-Fa-f]+) exec=(\w+)", blob)
+        exec_secs = [(int(a, 16), int(a, 16) + int(sz, 16))
+                     for _, a, sz, ex in secs if ex.lower() in ("true", "1")]
+        if not exec_secs:
+            ctx.log("WARNING: could not parse exec sections from the rexglue trace (log format may "
+                    "have changed) -> skipping jump tables")
+            return ctx.mark("jumptables", {"skipped": "no-sections"})
     text_start, text_end = min(s for s, _ in exec_secs), max(e for _, e in exec_secs)
     if not (base <= text_start < text_end <= image_end):
         ctx.log("WARNING: parsed section range looks wrong (0x%X..0x%X in 0x%X..0x%X) -> skipping"
@@ -356,6 +374,36 @@ def stage_jumptables(ctx):
     json.dump({"image": image, "image_base": hex(base), "image_end": hex(image_end),
                "text_start": hex(text_start), "text_end": hex(text_end), "output": out_json,
                "functions": funcs, "format": "rexglue", "toml": ctx.switches}, open(cfg, "w"))
+    # --- global IDA cache: identical image => identical analysis --------------
+    # The IDA pass is the pipeline's one 100%-serial single-core sink (minutes on
+    # a big title) and is fully determined by (image bytes, analysis code). A
+    # re-port of the same game (budokai3's fresh regen re-paid a byte-identical
+    # analysis) or a wiped work dir should never re-run it. Keyed by
+    # sha256(image) + section ranges + the xenon-jumptables revision; the cached
+    # artifacts are the switch_tables.toml AND the .i64 (which deepextract
+    # reuses, so a hit accelerates that stage too). REXAUTO_NO_IDA_CACHE=1 opts out.
+    ida_i64 = image + ".elf.i64"
+    cache_hit = False
+    cache_dir = None
+    if not os.environ.get("REXAUTO_NO_IDA_CACHE"):
+        jt_rev = ""
+        try:
+            r = run(["git", "-C", ctx.env["jt_repo"], "rev-parse", "HEAD"],
+                    capture_output=True, text=True)
+            jt_rev = (r.stdout or "").strip()
+        except Exception:
+            pass
+        key = "%s-%x-%x-%s" % (_sha256(image)[:20], text_start, text_end, jt_rev[:12])
+        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "ida", key)
+        c_toml, c_i64 = os.path.join(cache_dir, "switch_tables.toml"), os.path.join(cache_dir, "image.i64")
+        if os.path.exists(c_toml) and os.path.exists(c_i64):
+            shutil.copyfile(c_toml, ctx.switches)
+            shutil.copyfile(c_i64, ida_i64)
+            n = open(ctx.switches).read().count("[[switch_tables]]")
+            add_includes(ctx, ["%s_switch_tables.toml" % ctx.name])
+            ctx.log("jump tables from IDA cache: %d tables (identical image analyzed "
+                    "before; delete rexauto/cache/ida to force re-analysis)" % n)
+            return ctx.mark("jumptables", {"tables": n, "cache": True})
     idalog = out_json + ".idalog.txt"
     try:
         if os.path.exists(idalog):
@@ -373,6 +421,13 @@ def stage_jumptables(ctx):
         return ctx.mark("jumptables", {"skipped": "recover-fail"})
     n = open(ctx.switches).read().count("[[switch_tables]]")
     add_includes(ctx, ["%s_switch_tables.toml" % ctx.name])
+    if cache_dir and os.path.exists(ida_i64):
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            shutil.copyfile(ctx.switches, os.path.join(cache_dir, "switch_tables.toml"))
+            shutil.copyfile(ida_i64, os.path.join(cache_dir, "image.i64"))
+        except OSError as ex:
+            ctx.log("  (IDA cache write skipped: %s)" % ex)
     ctx.log("jump tables recovered: %d" % n)
     ctx.mark("jumptables", {"tables": n})
 
@@ -469,6 +524,14 @@ def do_codegen(ctx, env=None, level="error"):
             # before compile. No <name>_codegen_patches.toml -> no-op (byte-identical).
             _cgp.apply(ctx, log=ctx.log)
             _gen_restore_unchanged(ctx, snap)
+            # PCH wiring must run AFTER codegen: the only earlier call site
+            # (setup_extra_modules) fires before <name>_init.h exists, so its
+            # exists() guard silently skipped the injection and the v2.4.0
+            # ~21%/TU win quietly vanished for every fresh port (fleet audit:
+            # 1/18 ports had the PCH block). Idempotent, so calling per-codegen
+            # is free once injected.
+            _inject_pch_into_cmake(ctx)
+            _inject_debug_diet_into_cmake(ctx)
             return out
         targets = _heal.unresolved_calls_from_text(out)
         if not targets:
@@ -823,6 +886,34 @@ def _inject_pch_into_cmake(ctx):
         "    \"${CMAKE_CURRENT_SOURCE_DIR}/generated/default/%s_init.h\")\n"
         % (ctx.name, ctx.name, ctx.name))
     ctx.log("  wired PCH for %s_init.h into CMakeLists" % ctx.name)
+
+
+def _inject_debug_diet_into_cmake(ctx):
+    """RelWithDebInfo builds carry FULL codeview debug info (-g -gcodeview via
+    CMake's MSVC debug-format abstraction): variable/type info for tens of
+    thousands of generated functions = a ~100MB PDB re-linked on EVERY heal
+    round / gate rebuild (~70s a cycle measured on gta_san_andreas).
+    -gline-tables-only keeps exactly what our tooling uses -- function symbols +
+    line tables (cdb guest stacks like sub_82XXXXXX+off still resolve) -- and
+    drops the bulk. Output-neutral for the generated C++ AND for .text: debug
+    info only. Appended via target_compile_options so it lands AFTER the
+    config-level -g and downgrades it. Idempotent; REXAUTO_FULL_DEBUG=1 opts out."""
+    if os.environ.get("REXAUTO_FULL_DEBUG"):
+        return
+    cml = os.path.join(ctx.port, "CMakeLists.txt")
+    if not os.path.exists(cml):
+        return
+    txt = open(cml, encoding="utf-8", errors="ignore").read()
+    if "gline-tables-only" in txt:
+        return
+    open(cml, "a", encoding="utf-8").write(
+        "\n# rexauto-debug-diet: keep function symbols + line tables, drop the\n"
+        "# variable/type debug info that bloats the PDB and slows every relink\n"
+        "# (build perf; debug-info-only -- .text and codegen stay byte-identical).\n"
+        "if(CMAKE_CXX_COMPILER_ID MATCHES \"Clang\")\n"
+        "    target_compile_options(%s PRIVATE $<$<CONFIG:RelWithDebInfo>:-gline-tables-only>)\n"
+        "endif()\n" % ctx.name)
+    ctx.log("  wired -gline-tables-only (RelWithDebInfo) into CMakeLists")
 
 
 def _cpp_str(s):

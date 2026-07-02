@@ -10,3 +10,4 @@ autoports/
 .rexauto_state
 .claude/
 covers/
+cache/
