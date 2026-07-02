@@ -1,5 +1,53 @@
 # Changelog
 
+## 2.8.0 — "launch once" (2026-07-02)
+
+Verification stops re-launching the game. A cured title now launches **twice ever**
+(a priming boot + one long-window confirmation) and then **zero times** on every
+subsequent pipeline run, via a persisted convergence receipt. Directly targets "the
+pipeline keeps opening and closing the game". **rexauto-only; SDK unchanged**
+(`rexglue.exe` `06b93244`, `rexruntime.dll` `4e75b494`).
+
+- **Convergence receipt (Tier 0 = 0 launches):** `<name>_runheal_receipt.json`,
+  fingerprinted by sha256(exe) + sha256(rexruntime.dll) + sha256(xex) [+ title-update]
+  + game root. Matching receipt (verified with a window ≥ the one requested now) ⇒
+  runheal doesn't launch at all; any real change (codegen/cure/SDK/re-rip/game swap)
+  changes a hash and re-verifies automatically. `REXAUTO_FORCE_RUNHEAL=1` or deleting
+  the receipt forces a live check. Receipts are minted only on POSITIVE evidence:
+  game still alive at window end, real code range known (not the fallback window),
+  a log actually produced.
+- **Merged discover+confirm (Tier 1 = minimal launches):** the old
+  discover(22s)×N → fatal(22s) → confirm(47s) dance is one loop of discover-mode runs.
+  Soundness: a discover run that logs **zero targets at all** no-op'd nothing, so its
+  execution is bit-identical to a clean run — it doubles as the confirmation. Heal
+  rounds keep the short window for fast iteration; only the deciding clean run pays 47s.
+- **Second-boot coverage kept:** the deciding run must not be the guest state's
+  first-ever boot (first boot creates saves/caches; load-existing-state paths — the
+  v2.6.0 xam_content crash class — only run on boot 2). A priming marker keyed to the
+  guest fingerprint (not stale log files) tracks this.
+- **Honest multi-XEX verdicts:** convergence keys on zero **logged** targets, not zero
+  in-range. An out-of-image/misaligned call that discover mode no-op'd would FATAL a
+  production run — that now yields a "production_fatal" verdict with the uncurable
+  list, never a "survived" receipt (old flow's fatal-confirm honesty, preserved).
+- **Corrupted-continuation guard:** when a discover run logs uncurable targets
+  alongside curable ones, everything after the first no-op ran on corrupt state — one
+  fatal-mode run at the SAME window re-reads ground truth before anything is
+  registered; a clean fatal re-read is treated as inconclusive, never as a verdict.
+- **`_code_range` actually reads the range now:** a doubled "default" path segment made
+  it silently fall back to the generic 0x82000000–0x84000000 window for EVERY game
+  since inception — the out-of-image guard never used the real per-title code range.
+  Fixed; the fallback (exact=False) additionally blocks receipt minting.
+- **Failures fail:** no-exe / no-log / rebuild-failed paths raise SystemExit (like
+  every other stage) instead of writing a truthy state mark that made the next
+  pipeline run print "skip runheal (done)" for a stage that verified nothing.
+- Hardened by two adversarial review workflows (4 + 2 agents): 11 findings folded in
+  (zero-logged vs zero-filtered convergence, no-evidence receipts, guest-image
+  fingerprinting, receipt window honoring, --publish-gabarito on receipt hits,
+  label-heal rc re-check, chronological exemplars, plain-retry bounding).
+- Proven live on budokai3: run 1 = "converged in 2 launch(es)" + receipt; run 2 =
+  "receipt matches → not launching the game". Codegen untouched ⇒ byte-identical
+  fleet-wide.
+
 ## 2.7.1 — "resync" (2026-07-02)
 
 Run-heal no longer declares a false wall on a stale exe. **rexauto-only; SDK unchanged**

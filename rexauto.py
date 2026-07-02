@@ -1171,92 +1171,201 @@ def run_once(ctx, seconds, discover=False):
 
 
 def _code_range(ctx):
-    """[lo, hi) of the entrypoint module's generated code, for filtering discovered
-    targets down to plausible function addresses."""
+    """([lo, hi), exact) of the entrypoint module's generated code, for filtering
+    discovered targets down to plausible function addresses. exact=False means the
+    wide fallback window -- fine for heal filtering, NOT precise enough to persist a
+    verified-forever receipt on (in-image DATA addresses would pass as "in code").
+    NOTE: ctx.gen already ends in generated/default -- an extra "default" segment
+    here used to make the open() always fail, silently pinning every game to the
+    fallback window (adversarial review catch)."""
     import re
     try:
-        h = open(os.path.join(ctx.gen, "default", ctx.name + "_init.h")).read()
+        h = open(os.path.join(ctx.gen, ctx.name + "_init.h")).read()
         b = int(re.search(r"REX_CODE_BASE\s+0x([0-9A-Fa-f]+)", h).group(1), 16)
         s = int(re.search(r"REX_CODE_SIZE\s+0x([0-9A-Fa-f]+)", h).group(1), 16)
-        return b, b + s
+        return b, b + s, True
     except Exception:
-        return 0x82000000, 0x84000000
+        return 0x82000000, 0x84000000, False
+
+
+def _runheal_fingerprint(ctx):
+    """What a convergence verdict is actually a property of: the exact game exe, the
+    runtime DLL it loads, AND the guest image it executes (xex + staged title-update
+    + which game root) -- the runtime re-reads those at every launch, so behavior can
+    change while exe+dll stay identical (adversarial review catch). A cure-toml/SDK/
+    codegen change flows into the exe hash; a re-rip/TU/game-swap flows into these."""
+    dll = os.path.join(ctx.builddir, "rexruntime.dll")
+    try:
+        return {"exe": _sha256(ctx.exe),
+                "runtime": _sha256(dll) if os.path.exists(dll) else "",
+                "image": _sha256(ctx.xex) if ctx.xex and os.path.exists(ctx.xex) else "",
+                "tu": _sha256(ctx.tu_xexp) if ctx.tu_xexp and os.path.exists(ctx.tu_xexp) else "",
+                "game": ctx.game or ""}
+    except Exception:
+        return None
 
 
 def stage_runheal(ctx):
     bat = write_build_bat(ctx)
-    # --- Fast bulk discovery -------------------------------------------------
-    # With REX_HEAL_DISCOVER the runtime logs+continues on each unregistered
-    # indirect target instead of aborting, so ONE run surfaces MANY missing
-    # functions. Register the whole batch and rebuild once; repeat until a run
-    # finds nothing new -- this collapses the O(N) one-at-a-time heal into a few
-    # rebuilds. Targets are filtered to aligned, in-code-range addresses (the
-    # corrupted no-op continuation can surface spurious ones; an extra generated
-    # function is harmless).
-    lo, hi = _code_range(ctx)
-    for r in range(1, 12 + 1):
-        txt, _ = run_once(ctx, ctx.args.run_seconds, discover=True)
-        addrs = [a for a in _heal.invalid_functions_from_text(txt)
-                 if lo <= a < hi and (a & 3) == 0]
-        n_reg, n_seed = _heal.register_or_seed(addrs, ctx.functions, ctx.forced, ctx.switches)
-        if n_seed:
-            _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
-        n = n_reg + n_seed
-        ctx.log("discover round %d: %d in-range targets -> +%d new (%d fn, %d landing)"
-                % (r, len(addrs), n, n_reg, n_seed))
-        if n == 0:
-            break
-        do_codegen(ctx)
-        logp, rc = do_build(ctx, bat)
-        if rc != 0 or not os.path.exists(ctx.exe):
-            if "use of undeclared label" in _heal._read_text(logp):
-                if _heal.write_forced(ctx.forced, _heal.forced_landings_from_log(logp)):
-                    _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
-                _heal.heal_boundaries(logp, ctx.gen, ctx.functions)
-                do_codegen(ctx)
-                do_build(ctx, bat)
-            else:
-                ctx.log("  discovery rebuild failed -> %s; falling back to per-fatal heal" % logp)
-                break
-    # --- Confirm + heal anything discovery missed (FATAL mode) ---------------
-    # A short heal window keeps iterations fast, but some titles only reach an
-    # unregistered indirect target (e.g. a vtable method) once they get deeper
-    # into startup/gameplay -- just past the window. Before declaring convergence,
-    # re-run with a longer window so those late fatals aren't missed (this is what
-    # made rayman crash at 0x82162208 ~1s past a 22s window after "converging").
+    lo, hi, range_exact = _code_range(ctx)
+    if not os.path.exists(ctx.exe):
+        # A failure must FAIL (SystemExit, like stage_build) -- a truthy mark would
+        # make the next plain pipeline run print "skip runheal (done)" and never
+        # re-attempt verification (adversarial review catch).
+        raise SystemExit("[rexauto] runheal: no exe at %s -- run the build stage first" % ctx.exe)
+    rcpt_path = os.path.join(ctx.port, "%s_runheal_receipt.json" % ctx.name)
     confirm_seconds = max(ctx.args.run_seconds * 2, ctx.args.run_seconds + 25)
+    # --- Tier 0: convergence receipt = ZERO launches --------------------------
+    # A "converged" verdict is a property of the binaries + guest image that ran.
+    # Persist it keyed by their hashes: when the same set comes around again (a
+    # pipeline re-run, --from build with no change, a GUI reopen) there is nothing
+    # new to learn from launching the game, so don't. Honored only if it was
+    # verified with a window at least as long as the one requested now. Delete the
+    # receipt (or set REXAUTO_FORCE_RUNHEAL=1) to force a live check.
+    fp = _runheal_fingerprint(ctx)
+    try:
+        rcpt = json.load(open(rcpt_path)) if os.path.exists(rcpt_path) else None
+    except Exception:
+        rcpt = None
+    if os.environ.get("REXAUTO_FORCE_RUNHEAL"):
+        rcpt = None
+    if fp and rcpt and rcpt.get("fingerprint") == fp \
+            and rcpt.get("seconds", 0) >= confirm_seconds:
+        ctx.log("runheal: receipt matches the current exe+runtime+image -> already "
+                "verified (%s); not launching the game (delete %s to re-verify)"
+                % (rcpt.get("verdict", "converged"), os.path.basename(rcpt_path)))
+        if getattr(ctx.args, "publish_gabarito", False):
+            publish_gabarito(ctx)  # cures are on disk; publishing needs no launch
+        return ctx.mark("runheal", {"receipt": True, "verdict": rcpt.get("verdict")})
+    # --- Tier 1: minimal launches decide ---------------------------------------
+    # Discover mode (REX_HEAL_DISCOVER): the runtime logs+continues on each
+    # unregistered indirect target instead of aborting, so one run surfaces MANY
+    # missing functions at once. The key property: if a discover run logs ZERO
+    # targets AT ALL, no call was ever no-op'd, so the execution was identical to
+    # a clean run -- that run doubles as the convergence confirmation (zero
+    # *logged*, not zero *in-range*: an out-of-image/misaligned no-op'd call means
+    # a production run FATALs there, so it must never mint a "survived" verdict --
+    # adversarial review catch). This collapses the old discover(22s)xN ->
+    # fatal(22s) -> confirm(47s) dance: a cured re-port launches ONCE, and the
+    # receipt makes the next pipeline run launch ZERO times. Guards that stay:
+    #  * long window on the deciding run (rayman crashed at 0x82162208 ~1s past a
+    #    22s window after "converging" on the short one); heal rounds in between
+    #    keep the short window for fast bulk iteration.
+    #  * the deciding run must not be the port's first-ever launch: first boot
+    #    creates saves/caches, and load-existing-state code paths (the v2.6.0
+    #    xam_content crash class) only execute on the SECOND boot. A clean
+    #    first-ever launch primes state; the next clean run decides.
+    #  * a launch that produced no log is no evidence -- never converge on it.
+    # "primed" = the CURRENT guest state (image+TU+game root) has been booted at
+    # least once, so saves/caches exist and second-boot code paths are reachable.
+    # Keyed to the guest fingerprint, not bare log existence: stale logs from a
+    # previous game root must not skip the priming run (adversarial review catch).
+    primed_path = os.path.join(ctx.port, "%s_runheal_primed.json" % ctx.name)
+    guest_fp = {k: fp[k] for k in ("image", "tu", "game")} if fp else None
+    try:
+        primed = guest_fp is not None and json.load(open(primed_path)) == guest_fp
+    except Exception:
+        primed = False
+    window = confirm_seconds
     resynced = set()  # addresses we've already forced a clean relink for (anti-loop)
     for it in range(1, ctx.args.heal_iters + 1):
-        txt, alive = run_once(ctx, ctx.args.run_seconds)
-        # Range-filter like the fast-discovery loop above: a FATAL can name an address
-        # OUTSIDE this module's recompiled code range (e.g. a call into a companion XEX
-        # a multi-XEX title loads at 0x88000000+). Registering such an out-of-image
-        # address as a {} function corrupts the port -- it killed sonic_adventure's boot
-        # (a stray "0x88610000" = {}). Only heal targets that live in this image.
-        addrs = [a for a in _heal.invalid_functions_from_text(txt)
-                 if lo <= a < hi and (a & 3) == 0]
+        primed_at_launch = primed
+        txt, alive = run_once(ctx, window, discover=True)
+        primed = True
+        if guest_fp and not primed_at_launch:
+            try:
+                json.dump(guest_fp, open(primed_path, "w"), indent=1)
+            except Exception:
+                pass
+        if not txt:
+            # No log = no evidence either way. FAIL (not mark): a truthy mark would
+            # make the next plain run skip the stage as "done" forever.
+            raise SystemExit("[rexauto] runheal: launch produced no log -- fix the "
+                             "launch environment and re-run")
+        # Range-filter: a logged target can be OUTSIDE this module's recompiled
+        # code range (e.g. a call into a companion XEX a multi-XEX title loads at
+        # 0x88000000+). Registering such an out-of-image address as a {} function
+        # corrupts the port -- it killed sonic_adventure's boot (a stray
+        # "0x88610000" = {}). Only heal targets that live in this image; report
+        # (never "cure") the rest.
+        logged = _heal.invalid_functions_ordered(txt)
+        addrs = [a for a in logged if lo <= a < hi and (a & 3) == 0]
+        uncurable = [a for a in logged if a not in set(addrs)]
+        if addrs and uncurable:
+            # Corrupted-continuation guard: after the first no-op'd uncurable call
+            # the run executes with corrupt state, so in-range targets logged in
+            # the SAME run may be garbage that register_or_seed would enshrine.
+            # One fatal-mode run gives ground truth (it aborts at the first
+            # invalid target, so everything it logs precedes any corruption).
+            # SAME window as the discover run (a shorter one would miss targets
+            # first reached late and mint a false "uncurable" verdict); BOTH lists
+            # are recomputed from the ground-truth log; a clean fatal run where
+            # discover saw targets is timing nondeterminism -> inconclusive,
+            # re-observe instead of deciding (adversarial review catches).
+            ctx.log("  %d uncurable no-op'd target(s) alongside %d curable -> "
+                    "re-reading ground truth with one fatal-mode run"
+                    % (len(uncurable), len(addrs)))
+            txt2, _ = run_once(ctx, window)
+            if not txt2:
+                raise SystemExit("[rexauto] runheal: ground-truth launch produced no "
+                                 "log -- fix the launch environment and re-run")
+            logged2 = _heal.invalid_functions_ordered(txt2)
+            if not logged2:
+                ctx.log("  fatal-mode run logged nothing (timing nondeterminism); re-observing")
+                continue
+            addrs = [a for a in logged2 if lo <= a < hi and (a & 3) == 0]
+            uncurable = [a for a in logged2 if a not in set(addrs)]
         if not addrs:
-            ctx.log("  no invalid-function fatal in %ds; confirming with a %ds window"
-                    % (ctx.args.run_seconds, confirm_seconds))
-            ctxt, calive = run_once(ctx, confirm_seconds)
-            caddrs = [a for a in _heal.invalid_functions_from_text(ctxt)
-                      if lo <= a < hi and (a & 3) == 0]
-            if not caddrs:
-                verdict = ("survived %ds with no invalid-function fatal" % confirm_seconds) if calive \
-                    else "exited without an invalid-function fatal (other stop - likely GPU/runtime)"
-                ctx.log("run-heal converged: %s" % verdict)
+            if uncurable:
+                # Honest non-convergence: discover mode no-op'd calls that a
+                # production run FATALs on; nothing in THIS module cures them.
+                verdict = ("recompilation of this module found no curable targets, but "
+                           "%d uncurable target(s) were no-op'd (out-of-image/misaligned,"
+                           " e.g. 0x%X) -- a production run FATALs there (companion XEX?)"
+                           % (len(uncurable), uncurable[0]))
+                ctx.log("run-heal: %s" % verdict)
                 if getattr(ctx.args, "publish_gabarito", False):
                     publish_gabarito(ctx)
-                return ctx.mark("runheal", {"iters": it, "alive": calive,
-                                            "confirmed_seconds": confirm_seconds})
-            ctx.log("  confirmation surfaced %d late fatal(s); continuing heal" % len(caddrs))
-            addrs, txt = caddrs, ctxt
+                # "alive" records what was OBSERVED (discover mode no-ops the calls,
+                # so the game may well be alive); the prediction lives in its own key.
+                return ctx.mark("runheal", {"iters": it, "alive": alive,
+                                            "production_fatal": True,
+                                            "uncurable": ["0x%X" % a for a in uncurable[:8]]})
+            if window != confirm_seconds:
+                ctx.log("  clean at %ds; stretching to the %ds confirm window"
+                        % (window, confirm_seconds))
+                window = confirm_seconds
+                continue
+            if not primed_at_launch:
+                ctx.log("  clean first-ever launch primed saves/caches; re-running once "
+                        "against existing state (second-boot code paths)")
+                continue
+            verdict = ("survived %ds with no invalid-function fatal" % confirm_seconds) if alive \
+                else "exited without an invalid-function fatal (other stop - likely GPU/runtime)"
+            ctx.log("run-heal converged in %d launch(es): %s" % (it, verdict))
+            if getattr(ctx.args, "publish_gabarito", False):
+                publish_gabarito(ctx)
+            # The receipt is only minted on POSITIVE evidence: the game was still
+            # alive at window end (an early "other stop" exit may be transient --
+            # driver, GPU wall -- and is cheap to re-verify precisely because it
+            # exits early) and the real code range was known (the fallback window
+            # would let in-image DATA addresses masquerade as verified code).
+            if alive and range_exact:
+                fp = _runheal_fingerprint(ctx)  # recompute: heal rounds relinked the exe
+                if fp:
+                    json.dump({"fingerprint": fp, "verdict": verdict,
+                               "seconds": confirm_seconds, "launches": it},
+                              open(rcpt_path, "w"), indent=1)
+            return ctx.mark("runheal", {"iters": it, "alive": alive,
+                                        "confirmed_seconds": confirm_seconds})
         n_reg, n_seed = _heal.register_or_seed(addrs, ctx.functions, ctx.forced, ctx.switches)
         if n_seed:
             _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
         n = n_reg + n_seed
-        ctx.log("iter %d: fatal @ %s -> +%d (%d fn, %d landing); rebuilding"
+        ctx.log("heal round %d: target(s) @ %s -> +%d (%d fn, %d landing); rebuilding"
                 % (it, ",".join("0x%X" % a for a in addrs), n, n_reg, n_seed))
+        window = ctx.args.run_seconds  # short fast rounds while targets keep coming;
+        # the final clean round stretches back to confirm_seconds before converging.
         if n == 0:
             # register_or_seed added nothing -> addrs[0] is ALREADY registered in the
             # current sources. But the *running exe* can lag the codegen: an earlier
@@ -1270,7 +1379,7 @@ def stage_runheal(ctx):
             a0 = addrs[0]
             if a0 not in resynced:
                 resynced.add(a0)
-                ctx.log("  0x%X already registered but still fatal -> resync exe "
+                ctx.log("  0x%X already registered but still flagged -> resync exe "
                         "(codegen may be newer than the linked exe) and retry" % a0)
                 do_codegen(ctx)
                 logp, rc = do_build(ctx, bat)
@@ -1281,16 +1390,28 @@ def stage_runheal(ctx):
             return ctx.mark("runheal", {"stuck": "0x%X" % a0})
         do_codegen(ctx)
         logp, rc = do_build(ctx, bat)
-        if rc != 0 or not os.path.exists(ctx.exe):
+        # Label-heal to convergence (rc re-checked each pass -- a 2-deep cascade used
+        # to dead-end silently) + ONE plain retry for transient failures (e.g. the
+        # relink racing the just-killed game process still holding the exe); a second
+        # consecutive non-label failure is a real break -- stop burning rebuilds.
+        plain_fails = 0
+        for _pass in range(3):
+            if rc == 0 and os.path.exists(ctx.exe):
+                break
             if "use of undeclared label" in _heal._read_text(logp):
+                plain_fails = 0
                 if _heal.write_forced(ctx.forced, _heal.forced_landings_from_log(logp)):
                     _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
                 _heal.heal_boundaries(logp, ctx.gen, ctx.functions)
                 do_codegen(ctx)
-                do_build(ctx, bat)
             else:
-                ctx.log("  rebuild failed after registering 0x%X -> see %s" % (addrs[0], logp))
-                return ctx.mark("runheal", {"build_failed": True})
+                plain_fails += 1
+                if plain_fails >= 2:
+                    break
+            logp, rc = do_build(ctx, bat)
+        if rc != 0 or not os.path.exists(ctx.exe):
+            raise SystemExit("[rexauto] runheal: rebuild failed after registering %d "
+                             "target(s) -> see %s" % (len(addrs), logp))
     ctx.log("run-heal hit max iterations (%d)" % ctx.args.heal_iters)
     if getattr(ctx.args, "publish_gabarito", False):
         publish_gabarito(ctx)

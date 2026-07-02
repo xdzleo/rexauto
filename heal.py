@@ -282,6 +282,13 @@ def invalid_functions_from_text(txt):
     return sorted(set(int(m.group(1), 16) for m in INVALID.finditer(txt)))
 
 
+def invalid_functions_ordered(txt):
+    """Like invalid_functions_from_text but preserving FIRST-OCCURRENCE order.
+    In a discover-mode run everything logged after the first no-op'd uncurable
+    call may be post-corruption garbage, so chronology picks honest exemplars."""
+    return list(dict.fromkeys(int(m.group(1), 16) for m in INVALID.finditer(txt)))
+
+
 def unresolved_calls_from_text(txt):
     """Tail-call targets codegen's Validate phase couldn't place in a function."""
     return sorted(set(int(m.group(1), 16) for m in UNRESOLVED.finditer(txt)))
