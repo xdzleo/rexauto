@@ -1568,7 +1568,14 @@ SDK_PIN = {
     # dead-at-boot -> engine up, 20 threads, input polling, rendering), Halo 3/
     # Reach/4, Forza 2 (xenia label kernel-KeSetCurrentStackPointers, 15 titles).
     # rexglue.exe UNCHANGED -> codegen byte-identical fleet-wide (gate all-blessed PASS).
-    "rexglue.exe":    "06b932444f9a4590d265a1714ac3d906d73874d65f5f53fba3bed5f840711e29",
+    # v2.11 (codegen perf): CODEGEN-ONLY -- GapFill's cleanupAbsorbedGapFills was
+    # O(gapfills x total-functions) (~1.8B probes at 42k funcs; quadratic on GTA V):
+    # replaced with a walk of the existing sorted-base index. Same predicate, same
+    # removal set => byte-identical (gate: blessed fleet PASS twice). 8.2s -> 31ms
+    # per codegen pass on GTA-SA; bigger absolute win on every larger title and on
+    # every repeated pass (setjmp/image-dump/pure-add gate/heal retries).
+    # rexruntime UNCHANGED (20aec5ac).
+    "rexglue.exe":    "7e9591d41566a29062a0f01ebdc0ea0087106eca40f772b6316a48599766d870",
     "rexruntime.dll": "20aec5ac8891d842767645e7493fa183cb215df559d137dbeb253913913265ad",
 }
 

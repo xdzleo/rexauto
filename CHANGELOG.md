@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.11.0 — "codegen fast" (2026-07-02)
+
+One SDK codegen fix, found by measuring instead of guessing: GapFill's
+absorbed-cleanup was **O(gapfills × total functions)** — ~1.8 billion
+`containsAddress` probes at 42k functions, and quadratic growth on bigger
+titles (a real slice of GTA V's ~5min-per-codegen passes). Replaced with a
+backward walk of the existing sorted-base index (the same one
+`getFunctionContaining` uses), bounded by the largest function size. Same
+predicate, same removal set ⇒ **byte-identical output**, proven by the
+regression gate twice (blessed fleet PASS, 29–125 files identical per title).
+
+**Measured: 8.2s → 31ms per codegen pass on GTA-SA (264×).** Every title pays
+this on EVERY codegen pass (setjmp scan, image dump, pure-add gate passes, heal
+retries), so it compounds: a fresh GTA V port runs 6–8 codegens.
+
+Honest engineering note: a parallel-Discover attempt was built, adversarially
+reviewed, and REVERTED this same session — it gave ~0 warm-run gain (the 19s
+"Discover cost" was cold-cache illusion; warm is 2.3s) and the review proved a
+real determinism hazard on chunk/parent titles. The gate + adversarial review
+did their job. The wall-clock win came from fixing the algorithm, not from
+throwing cores at it.
+
+SDK_PIN: `rexglue.exe` → `7e9591d4` (codegen-only); `rexruntime.dll` unchanged
+(`20aec5ac`).
+
 ## 2.10.0 — "build fast" (2026-07-02)
 
 Pipeline speed, all byte-identical output. **rexauto-only; SDK unchanged**
