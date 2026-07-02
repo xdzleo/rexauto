@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.7.1 — "resync" (2026-07-02)
+
+Run-heal no longer declares a false wall on a stale exe. **rexauto-only; SDK unchanged**
+(`rexglue.exe` `06b93244`, `rexruntime.dll` `4e75b494`). Codegen byte-identical across the
+fleet (gate: 8 blessed games PASS, only the two intentionally re-ported games changed).
+
+- **Resync-before-stuck** (`stage_runheal`): when a FATAL names a function that is ALREADY
+  registered in the current sources, the running exe can lag the codegen — an earlier
+  codegen (deep-extract gate churn, or a prior no-op heal) leaves `register.cpp` newer than
+  the linked exe, so the built exe's dispatch tables never got `SetFunction(addr)` → a
+  SPURIOUS "invalid or unregistered function" fatal on a function that source-registers
+  fine. Run-heal now forces one codegen+relink to resync the exe and retries; only if the
+  same address STILL fatals after a clean relink is it declared a genuine wall (anti-loop
+  guarded, one resync per address).
+- **Why it matters:** this exact stale-exe case made **dbz** (`dragon_ball_z_ultimate_tenkaichi`)
+  look like an unfixable runtime wall at `0x82415F90` (a registered vtable method) when a
+  plain relink converged it. The false "stuck" verdict is the kind of thing that wrongly
+  concedes a title as "not recompilable".
+- **Fleet: 4 → 5 stable.** dbz re-ported on the v2.7.0 pipeline now converges (47s, into
+  gameplay context). **budokai3** re-generated fresh (no hand-tuned `.WORKING74`/`.corrected69`
+  cruft): 75 switch tables (≥ the old 74), +69 deep-extracted functions, run-heal a **no-op**
+  (deep-extract cured everything statically) — the pipeline alone matched months of manual
+  tuning. Both blessed.
+
 ## 2.7.0 — "cure once" (2026-07-02)
 
 Static function/vtable recovery is now a **pipeline stage** — a game's "invalid

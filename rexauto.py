@@ -1225,6 +1225,7 @@ def stage_runheal(ctx):
     # re-run with a longer window so those late fatals aren't missed (this is what
     # made rayman crash at 0x82162208 ~1s past a 22s window after "converging").
     confirm_seconds = max(ctx.args.run_seconds * 2, ctx.args.run_seconds + 25)
+    resynced = set()  # addresses we've already forced a clean relink for (anti-loop)
     for it in range(1, ctx.args.heal_iters + 1):
         txt, alive = run_once(ctx, ctx.args.run_seconds)
         # Range-filter like the fast-discovery loop above: a FATAL can name an address
@@ -1257,8 +1258,27 @@ def stage_runheal(ctx):
         ctx.log("iter %d: fatal @ %s -> +%d (%d fn, %d landing); rebuilding"
                 % (it, ",".join("0x%X" % a for a in addrs), n, n_reg, n_seed))
         if n == 0:
-            ctx.log("  stuck on 0x%X (already registered) — needs a closer look" % addrs[0])
-            return ctx.mark("runheal", {"stuck": "0x%X" % addrs[0]})
+            # register_or_seed added nothing -> addrs[0] is ALREADY registered in the
+            # current sources. But the *running exe* can lag the codegen: an earlier
+            # codegen (deep-extract gate churn, or a prior no-op heal) leaves
+            # register.cpp newer than the linked exe, so the built exe's dispatch tables
+            # never got SetFunction(addr) -> a SPURIOUS "unregistered" fatal on a
+            # function that source-registers fine. This exact case made dbz look like an
+            # unfixable runtime wall at 0x82415F90 when a plain relink converged it.
+            # Force one codegen+relink to resync the exe, then re-run. Only if the same
+            # address STILL fatals after a clean relink is it a genuine wall.
+            a0 = addrs[0]
+            if a0 not in resynced:
+                resynced.add(a0)
+                ctx.log("  0x%X already registered but still fatal -> resync exe "
+                        "(codegen may be newer than the linked exe) and retry" % a0)
+                do_codegen(ctx)
+                logp, rc = do_build(ctx, bat)
+                if rc == 0 and os.path.exists(ctx.exe):
+                    continue  # next iteration re-runs against the resynced exe
+                ctx.log("  resync rebuild failed -> %s" % logp)
+            ctx.log("  stuck on 0x%X (already registered, survives resync) — needs a closer look" % a0)
+            return ctx.mark("runheal", {"stuck": "0x%X" % a0})
         do_codegen(ctx)
         logp, rc = do_build(ctx, bat)
         if rc != 0 or not os.path.exists(ctx.exe):
