@@ -473,7 +473,13 @@ def write_build_bat(ctx):
          '-Drexglue_DIR="%s/lib/cmake/rexglue"'
          % (build_type, ctx.env["clang"].replace("\\", "/"), ctx.env["clangxx"].replace("\\", "/"), sdk, sdk)),
         "cmake --build out/build/win-amd64-release --parallel -- -k 0",
-        "echo RC=%errorlevel%",
+        # capture the build's errorlevel BEFORE echo resets it -- `echo RC=...`
+        # used to be the last command, so the bat's exit code was ALWAYS 0 and
+        # a failed heal-round rebuild silently relaunched the stale exe (the
+        # Gears of War 3 ghost-target loop).
+        "set BUILDRC=%errorlevel%",
+        "echo RC=%BUILDRC%",
+        "exit /b %BUILDRC%",
     ]
     open(bat, "w").write("\r\n".join(lines) + "\r\n")
     return bat
@@ -495,14 +501,17 @@ def _gen_snapshot(ctx):
 
 def _gen_restore_unchanged(ctx, snap):
     """Restore the mtime of regenerated files that didn't really change, so ninja
-    skips recompiling them. The shared init header gains a DECLARE_REX_FUNC line
-    on every heal registration — but a new extern declaration cannot change any
-    already-compiled TU, so if the header's *only* diff is added DECLARE_REX_FUNC
-    lines (nothing removed, no macro/table line touched) it is safe to keep its
-    old timestamp. Any other change (a REX_IMAGE_* macro, a removal) falls through
-    to a full recompile. Lossless either way."""
-    units = headers = 0
-    for p, (h, mt, oldlines) in snap.items():
+    skips recompiling them. NOTE: an earlier version also kept the old timestamp
+    on the shared init header when its only diff was added DECLARE_REX_FUNC lines
+    ("a new extern can't change a compiled TU"). That is UNSOUND with the PCH:
+    clang validates the precompiled header against the header's CONTENT/size, so
+    a content-changed header with an old mtime leaves the PCH stale and every
+    subsequent compile fails ("modified since the precompiled header was built")
+    -- which, combined with the always-0 build-bat exit code, made heal rounds
+    silently relaunch a stale exe (Gears of War 3 ghost-target loop). A changed
+    header now always keeps its new mtime: the PCH and its TUs rebuild."""
+    units = 0
+    for p, (h, mt, _oldlines) in snap.items():
         try:
             if not os.path.exists(p):
                 continue
@@ -510,23 +519,36 @@ def _gen_restore_unchanged(ctx, snap):
             if hashlib.md5(data).digest() == h:
                 os.utime(p, (mt, mt))
                 units += 1
-            elif oldlines is not None:
-                new = set(data.decode("utf-8", "ignore").splitlines())
-                added, removed = new - oldlines, oldlines - new
-                if added and not removed and all("DECLARE_REX_FUNC" in l for l in added):
-                    os.utime(p, (mt, mt))
-                    headers += 1
         except OSError:
             pass
+    headers = 0
     if units or headers:
         ctx.log("  incremental rebuild: reused %d unit(s)%s"
                 % (units, " + %d header(s)" % headers if headers else ""))
+
+
+def _normalize_toml_newlines(ctx):
+    """Repair doubled carriage returns (\\r\\r\\n) in the per-project tomls.
+    A text-mode writer handed a string that already contained \\r\\n produces
+    them (seen once in the wild: a frozen-exe jumptables run corrupted
+    switch_tables.toml, and rexglue's toml parser hard-fails on \\r\\r).
+    Byte-preserving for healthy files: only rewrites when \\r\\r is present."""
+    for p in (ctx.functions, ctx.switches, ctx.forced, ctx.manifest):
+        try:
+            if p and os.path.exists(p):
+                raw = open(p, "rb").read()
+                if b"\r\r" in raw:
+                    open(p, "wb").write(raw.replace(b"\r\r\n", b"\r\n").replace(b"\r\r", b"\r\n"))
+                    ctx.log("repaired doubled line endings in %s" % os.path.basename(p))
+        except OSError:
+            pass
 
 
 def do_codegen(ctx, env=None, level="error"):
     """Run codegen, auto-registering unresolved tail-call targets (codegen's
     Validate phase reports them) until it passes. Returns the captured output
     (at trace level it carries the section ranges the jumptables stage needs)."""
+    _normalize_toml_newlines(ctx)
     snap = _gen_snapshot(ctx)
     for _ in range(10):
         r = rexglue(ctx, "--log-level", level, "codegen", ctx.manifest, env=env, capture=True)
@@ -1679,8 +1701,21 @@ SDK_PIN = {
     # Man import XUsbcam* (face-cam) and could not LINK without them; titles that
     # never call the camera never touch the stubs (pure export addition, gate
     # blessed-fleet codegen PASS + CA/Gears runtime alive). rexglue.exe UNCHANGED.
-    "rexglue.exe":    "7e9591d41566a29062a0f01ebdc0ea0087106eca40f772b6316a48599766d870",
-    "rexruntime.dll": "9b2c8fb10ec80f085146541195dfb08124934a2e864e22f7b727a84d77f9067f",
+    # v2.14 (codegen 1-line, fleet-wide INTENTIONAL diff): REX_CALL_INDIRECT_FUNC
+    # in the generated init.h now writes ctx.last_indirect_target UNCONDITIONALLY.
+    # Unregistered slots hold the InvalidFunctionTrap (non-null) so the likely
+    # path called the trap without the fallback ever running -> the trap reported
+    # a STALE target from an earlier resolved call. That ghost address made the
+    # run-heal chase already-registered functions forever (Gears of War 3:
+    # 0x8271C710 re-flagged every round while the real unresolved target was a
+    # different address). Diff = one macro line in every port's init.h; judged
+    # and re-blessed fleet-wide. rexruntime UNCHANGED.
+    # + runtime: InvalidFunctionTrap now logs GetFunction(target) before the
+    # fatal abort ("trap diagnostics"), bifurcating table-miss from call-path
+    # bugs at zero cost outside the abort path (how the ghost-target loop and
+    # the stale-exe chain were root-caused).
+    "rexglue.exe":    "c3c1139dc878c11dffa306ea7867e790d0fd78e94aff7476caa4d4f8777b029d",
+    "rexruntime.dll": "1840f9ad51afa594f95ab84e059758f3873787fa0030dff0313e8c2ba77d3643",
 }
 
 

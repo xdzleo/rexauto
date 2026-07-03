@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.14.0 — "truthful diagnostics" (2026-07-03)
+
+A Gears of War 3 report ("recompilação falhou") unraveled a three-bug chain
+that could send any port's run-heal into a forever loop — all three fixed:
+
+**Ghost targets (SDK codegen, fleet-wide 1-line diff).** The generated
+`REX_CALL_INDIRECT_FUNC` only wrote `ctx.last_indirect_target` on the
+fallback path; when a call hit an unregistered slot (which holds the trap),
+the trap fired reporting a STALE address from an earlier resolved call. The
+heal then chased functions that were already registered, forever. The target
+is now written unconditionally, and the trap logs `GetFunction(target)`
+before aborting — table-miss vs call-path bugs are now distinguishable at a
+glance ("trap diagnostics").
+
+**Stale-exe heal rounds (rexauto, since v2.10).** Restoring the init
+header's old mtime after added-DECLARE-only diffs is unsound with the PCH:
+clang validates the precompiled header against the header's CONTENT, so the
+stale PCH failed every subsequent compile. A changed header now always
+keeps its new mtime (PCH and TUs rebuild).
+
+**Always-0 build exit code (rexauto, since forever).** `_build.bat` ended
+with `echo RC=%errorlevel%` — the echo RESET the errorlevel, so a failed
+rebuild returned success and the heal silently relaunched the stale exe.
+The bat now propagates the real build exit code (`exit /b`).
+
+Also: per-project tomls are repaired automatically when a writer corrupts
+line endings into doubled carriage returns (rexglue's parser hard-fails on those; seen once
+in the wild on a frozen-exe jumptables run).
+
+SDK pin: `rexglue.exe` → `c3c1139d`, `rexruntime.dll` → `1840f9ad`
+(SDK commit `f9a5ebb`). The codegen diff is one macro line in every port's
+init.h — judged and re-blessed fleet-wide.
+
 ## 2.13.1 — "game icons" (2026-07-03)
 
 Built exes now carry the game's marketplace tile as their Windows icon.
