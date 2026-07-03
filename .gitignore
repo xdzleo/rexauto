@@ -11,3 +11,5 @@ autoports/
 .claude/
 covers/
 cache/
+tools/xctd_rip.exe
+thirdparty/libmspack/*.o

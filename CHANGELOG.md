@@ -1,5 +1,46 @@
 # Changelog
 
+## 2.13.0 — "transparent decode" (2026-07-03)
+
+**Captain America: Super Soldier reaches GAMEPLAY** — and the wall it was
+stuck behind is now a permanent pipeline capability.
+
+**New stage `xctd`** (between extract and init): titles whose assets ship
+transparently compressed (XCompress LZXTDECODE, magic `0F F5 12 ED`; the
+Xbox 360 KERNEL decompresses these on real hardware) are pre-decompressed in
+place, originals kept in `xctd_originals/`. Our runtime stubs
+`XFileXctdCompressionInformation`, so the game takes its "not compressed"
+path — serving plaintext is exactly what it expects. No-op (0 files) for
+every other title: fleet regression-free by construction.
+
+The format was cracked empirically (a 4-agent workflow root-caused a 1-byte
+parser desync: zero padding before 128KB boundaries can be ODD-length) and
+confirmed against public prior art (QuickBMS `unxmemlzx`, UniPyX). The
+decoder (`tools/xctd_rip.cpp` + vendored libmspack lzxd, built on demand
+with the pipeline's clang) handles the full matrix:
+- header flags: window, pad boundary, segment count, 20-bit/BE32 size table
+- raw payloads (segments=0), single-stream bundles, multi-segment archives
+- BOTH segment layouts: contiguous chunk stream (Captain America `DATA.*`)
+  and zoned/`k*zbs` (XBLA titles — 'Splosion Man/Ms. 'Splosion Man carry 237
+  XCTD files each, 834 MB → 2.4 GB)
+- BOTH LZX dialects: XMemCompress omits the CAB realign pad byte after
+  odd-sized UNCOMPRESSED blocks — per-segment retry with a dialect switch in
+  the vendored lzxd. Every decode is fully verified (frame accounting +
+  exact produced sizes) before anything is swapped.
+
+**Runtime: XUsbcam stub exports enabled** (SDK commit `1a9ac64`): the
+'Splosion Man pair imports the camera API and could not link. Pure export
+addition (no existing title touches the stubs); pin → `9b2c8fb1`.
+
+**Run-heal: absorbed-gap/vtable-thunk cure.** When an address is registered
+but the runtime still flags it after an exe resync, the cause is a neighbour
+function whose emitted body absorbed a functions-list gap containing the
+target (Captain America: a 16-byte virtual-call thunk at 0x822A2040 inside
+0x822A2010's body). The heal now shrinks the containing function with an
+end-override at the target — a true boundary, since the game just
+indirect-called it — and retries. Proved live: CA converged in 5 launches,
+survived 150s clean.
+
 ## 2.12.0 — "clean runtime, long watch" (2026-07-03)
 
 Two operational hardenings, no new features:

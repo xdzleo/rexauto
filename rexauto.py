@@ -46,7 +46,7 @@ import jt_landings as _jt
 import codegen_patches as _cgp
 import deepextract as _dx
 
-STAGES = ["extract", "init", "setjmp", "jumptables", "deepextract", "build", "runheal", "run"]
+STAGES = ["extract", "xctd", "init", "setjmp", "jumptables", "deepextract", "build", "runheal", "run"]
 MAX_BUILD_ATTEMPTS = 12
 
 
@@ -189,6 +189,24 @@ def stage_extract(ctx):
             ctx.log("title-update staged (%s) -- codegen + runtime auto-apply it in memory"
                     % os.path.basename(tu_xexp))
     ctx.mark("extract", info)
+
+
+def stage_xctd(ctx):
+    """Pre-decompress XCTD (XCompress LZXTDECODE 0F F5 12 ED) assets in place.
+    On real hardware the KERNEL transparently decompresses these; our runtime's
+    XctdCompressionInformation stub makes the game take its "not compressed"
+    path, so serving plaintext is exactly what it expects. No-op (0 files) for
+    every title that doesn't use it -- fleet regression-free by construction.
+    Runs BEFORE init/codegen so the whole pipeline sees the final game dir.
+    Proved on Captain America: Super Soldier (asset wall -> gameplay); same
+    format ships in Alien: Isolation, Monkey Island 2 SE, XCOM."""
+    import xctd as _xctd
+    game = ctx.game or ctx._game_out
+    if not os.path.isdir(game):
+        raise SystemExit("[rexauto] xctd: no game dir at %s -- run extract first" % game)
+    backup = os.path.join(ctx.work, "xctd_originals")
+    n = _xctd.rip_inplace(game, backup, ctx.env, log=ctx.log)
+    ctx.mark("xctd", {"files": n})
 
 
 def stage_init(ctx):
@@ -1279,6 +1297,24 @@ def _code_range(ctx):
         return 0x82000000, 0x84000000, False
 
 
+def _prev_list_function(ctx, addr):
+    """Largest functions-list start strictly below addr (None if unavailable or
+    addr itself is a list entry). Used to find the neighbour whose emitted body
+    absorbed a gap containing addr."""
+    import bisect
+    path = os.path.join(ctx.work, "%s_functions_list.txt" % ctx.name)
+    if not os.path.exists(path):
+        return None
+    try:
+        starts = sorted({int(l, 16) for l in open(path) if l.strip()})
+    except ValueError:
+        return None
+    i = bisect.bisect_left(starts, addr)
+    if i < len(starts) and starts[i] == addr:
+        return None  # addr is a known start; overlap is not the story here
+    return starts[i - 1] if i > 0 else None
+
+
 def _runheal_fingerprint(ctx):
     """What a convergence verdict is actually a property of: the exact game exe, the
     runtime DLL it loads, AND the guest image it executes (xex + staged title-update
@@ -1365,6 +1401,7 @@ def stage_runheal(ctx):
         primed = False
     window = confirm_seconds
     resynced = set()  # addresses we've already forced a clean relink for (anti-loop)
+    shrunk = set()    # containing functions we've already end-shrunk (anti-loop)
     for it in range(1, ctx.args.heal_iters + 1):
         primed_at_launch = primed
         txt, alive = run_once(ctx, window, discover=True)
@@ -1483,6 +1520,30 @@ def stage_runheal(ctx):
                 if rc == 0 and os.path.exists(ctx.exe):
                     continue  # next iteration re-runs against the resynced exe
                 ctx.log("  resync rebuild failed -> %s" % logp)
+            # Boundary overlap: the address IS registered but codegen ignores the
+            # override because a NEIGHBOUR's emitted body extends across it (the
+            # scanner absorbed a functions-list gap). Seen as vtable-thunk tables:
+            # Captain America 0x822A2040 is a 16-byte virtual-call thunk absorbed
+            # into 0x822A2010's body. The runtime just indirect-called the address,
+            # so it IS a true entry point -> shrink the containing function with an
+            # end-override at the target and re-codegen. Fires only on this exact
+            # class (registered + survives resync + a prior list entry spans it).
+            prev = _prev_list_function(ctx, a0)
+            if prev is not None and prev not in shrunk:
+                shrunk.add(prev)
+                ov = _heal.load_overrides_full(ctx.functions)
+                cur = ov.get(prev) or {}
+                if cur.get("end") is None or cur["end"] > a0:
+                    cur["end"] = a0
+                    ov[prev] = cur
+                    _heal.write_overrides_full(ctx.functions, ov)
+                    ctx.log("  0x%X lies inside 0x%X's emitted body -> shrink it with "
+                            "end=0x%X and retry (absorbed-gap/vtable-thunk class)" % (a0, prev, a0))
+                    do_codegen(ctx)
+                    logp, rc = do_build(ctx, bat)
+                    if rc == 0 and os.path.exists(ctx.exe):
+                        continue
+                    ctx.log("  shrink rebuild failed -> %s" % logp)
             ctx.log("  stuck on 0x%X (already registered, survives resync) — needs a closer look" % a0)
             return ctx.mark("runheal", {"stuck": "0x%X" % a0})
         do_codegen(ctx)
@@ -1587,8 +1648,13 @@ SDK_PIN = {
     # hash (C++ links are non-reproducible) so the pin is re-generated to the
     # actually-shipped dump-free binary. Default-cvar behaviour is identical to
     # 20aec5ac -> runtime spot-check PASS, codegen (rexglue.exe) UNCHANGED.
+    # v2.13 (runtime ADDITIVE): xboxkrnl_usbcam.cpp stubs enabled in the kernel
+    # (the CMakeLists "TODO: lol eventually" line) -- 'Splosion Man/Ms. 'Splosion
+    # Man import XUsbcam* (face-cam) and could not LINK without them; titles that
+    # never call the camera never touch the stubs (pure export addition, gate
+    # blessed-fleet codegen PASS + CA/Gears runtime alive). rexglue.exe UNCHANGED.
     "rexglue.exe":    "7e9591d41566a29062a0f01ebdc0ea0087106eca40f772b6316a48599766d870",
-    "rexruntime.dll": "1258109c504affbc3bccfcbfc9604095f775442e0f3b3fe5ca1e7d56cd56e97d",
+    "rexruntime.dll": "9b2c8fb10ec80f085146541195dfb08124934a2e864e22f7b727a84d77f9067f",
 }
 
 
@@ -1750,7 +1816,7 @@ def main():
         raise SystemExit("--only %s: unknown stage" % args.only)
 
     state = ctx.load_state()
-    fns = {"extract": stage_extract, "init": stage_init, "setjmp": stage_setjmp,
+    fns = {"extract": stage_extract, "xctd": stage_xctd, "init": stage_init, "setjmp": stage_setjmp,
            "jumptables": stage_jumptables, "deepextract": stage_deepextract,
            "build": stage_build, "runheal": stage_runheal, "run": stage_run}
     start = order.index(args.from_stage) if args.from_stage else 0
