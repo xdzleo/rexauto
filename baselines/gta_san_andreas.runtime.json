@@ -1,0 +1,12 @@
+{
+ "exe_built": 1,
+ "boots": 1,
+ "alive": 1,
+ "fatals": 0,
+ "fatal_addrs": [],
+ "marker": 0,
+ "marker_str": "",
+ "health_tier": 2,
+ "run_seconds": 30,
+ "error": ""
+}

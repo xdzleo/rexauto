@@ -1305,7 +1305,13 @@ def stage_runheal(ctx):
         # re-attempt verification (adversarial review catch).
         raise SystemExit("[rexauto] runheal: no exe at %s -- run the build stage first" % ctx.exe)
     rcpt_path = os.path.join(ctx.port, "%s_runheal_receipt.json" % ctx.name)
-    confirm_seconds = max(ctx.args.run_seconds * 2, ctx.args.run_seconds + 25)
+    # Confirm/discover window floors at 150s. The short heal ROUNDS stay fast
+    # (ctx.args.run_seconds, ~22s), but the initial discover pass and the final
+    # convergence check run this long so late-loading indirect targets are caught
+    # up front instead of surfacing as a crash mid-gameplay. Gears of War Judgment
+    # loads sub_824CA490 only ~71s in (past the old 47s window) -> it converged
+    # "clean" then FATAL'd in play; a 150s window heals it in the same pass.
+    confirm_seconds = max(ctx.args.run_seconds * 2, ctx.args.run_seconds + 25, 150)
     # --- Tier 0: convergence receipt = ZERO launches --------------------------
     # A "converged" verdict is a property of the binaries + guest image that ran.
     # Persist it keyed by their hashes: when the same set comes around again (a
@@ -1575,8 +1581,14 @@ SDK_PIN = {
     # per codegen pass on GTA-SA; bigger absolute win on every larger title and on
     # every repeated pass (setjmp/image-dump/pure-add gate/heal retries).
     # rexruntime UNCHANGED (20aec5ac).
+    # v2.12 (runtime rebuild): the exploratory texture-dump-to-DDS path (a GPU
+    # debug feature, cvar-gated OFF by default) was removed from the runtime; no
+    # other runtime source changed (fiber HEAD afec3c0). The dll relinks to a new
+    # hash (C++ links are non-reproducible) so the pin is re-generated to the
+    # actually-shipped dump-free binary. Default-cvar behaviour is identical to
+    # 20aec5ac -> runtime spot-check PASS, codegen (rexglue.exe) UNCHANGED.
     "rexglue.exe":    "7e9591d41566a29062a0f01ebdc0ea0087106eca40f772b6316a48599766d870",
-    "rexruntime.dll": "20aec5ac8891d842767645e7493fa183cb215df559d137dbeb253913913265ad",
+    "rexruntime.dll": "1258109c504affbc3bccfcbfc9604095f775442e0f3b3fe5ca1e7d56cd56e97d",
 }
 
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.12.0 — "clean runtime, long watch" (2026-07-03)
+
+Two operational hardenings, no new features:
+
+**Run-heal confirm window floors at 150s.** Gears of War Judgment converged
+"clean" at the old 47s window and then FATAL'd ~71s into gameplay — a function
+(`sub_824CA490`) that only loads late. The heal ROUNDS stay fast (22s); only
+the initial discover pass and the final convergence check now run ≥150s, so
+late-loading indirect targets are cured up front instead of surfacing as a
+mid-gameplay crash. Gears re-verified: converged in 1 launch, survived 150s.
+
+**Runtime rebuilt without the exploratory texture-dump path** (a GPU debug
+feature, cvar-gated OFF, never shipped in any release). No tracked runtime
+source changed (fiber HEAD `afec3c0` + GapFill `9efdddc`); C++ links are not
+byte-reproducible so the SDK pin is re-generated to the shipped dump-free
+binary (`rexruntime.dll` → `1258109c`). Validated: Gears 150s survive + GTA-SA
+gate PASS (codegen 99 files byte-identical, runtime boots alive 0 FATALs,
+runtime baseline blessed).
+
 ## 2.11.0 — "codegen fast" (2026-07-02)
 
 One SDK codegen fix, found by measuring instead of guessing: GapFill's
