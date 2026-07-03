@@ -581,7 +581,33 @@ def do_build(ctx, bat):
                     last = now
                     name = line.strip().rsplit("/", 1)[-1].rsplit("\\", 1)[-1][:42]
                     ctx.log("@build %d/%d %s" % (n, tot, name))
-    return logp, p.wait()
+    rc = p.wait()
+    if rc == 0:
+        apply_game_icon(ctx)  # every relink rewrites the exe -> re-brand it
+    return logp, rc
+
+
+def apply_game_icon(ctx):
+    """Brand ctx.exe with the game's marketplace tile as its Windows icon.
+    Best-effort: offline/no-tile/locked-exe just skips (never fails a build)."""
+    try:
+        if not os.path.exists(ctx.exe):
+            return
+        xex = ctx.xex or os.path.join(ctx.game or "", "default.xex")
+        if not os.path.exists(xex):
+            return
+        with open(xex, "rb") as f:
+            tid = _extract._xex_title_id(f.read(0x10000))
+        png = _extract.fetch_title_icon(tid) if tid else None
+        if not png:
+            return
+        import exeicon
+        if exeicon.set_exe_icon(ctx.exe, png):
+            if not getattr(ctx, "_icon_logged", False):
+                ctx._icon_logged = True
+                ctx.log("exe branded with the game's tile icon (title_id %s)" % tid)
+    except Exception as ex:
+        ctx.log("icon branding skipped (%s)" % ex)
 
 
 def write_game_root(ctx):

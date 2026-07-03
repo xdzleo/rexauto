@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.13.1 — "game icons" (2026-07-03)
+
+Built exes now carry the game's marketplace tile as their Windows icon.
+`exeicon.py` converts the cached XboxUnity tile (the same one the GUI shows)
+into a proper multi-size icon group (16/24/32/48/64, classic 32bpp DIBs) and
+injects it post-link with the Win32 resource-update API — no .rc file, no
+CMake/codegen change, output `.text` untouched. Hooked into `do_build`, so
+every heal relink re-brands automatically; best-effort (offline/no-tile just
+skips). Fleet pass branded all 18 existing exes.
+
 ## 2.13.0 — "transparent decode" (2026-07-03)
 
 **Captain America: Super Soldier reaches GAMEPLAY** — and the wall it was
