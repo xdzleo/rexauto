@@ -1389,13 +1389,16 @@ def stage_runheal(ctx):
         # re-attempt verification (adversarial review catch).
         raise SystemExit("[rexauto] runheal: no exe at %s -- run the build stage first" % ctx.exe)
     rcpt_path = os.path.join(ctx.port, "%s_runheal_receipt.json" % ctx.name)
-    # Confirm/discover window floors at 150s. The short heal ROUNDS stay fast
+    # Confirm/discover window floors at 360s. The short heal ROUNDS stay fast
     # (ctx.args.run_seconds, ~22s), but the initial discover pass and the final
     # convergence check run this long so late-loading indirect targets are caught
     # up front instead of surfacing as a crash mid-gameplay. Gears of War Judgment
     # loads sub_824CA490 only ~71s in (past the old 47s window) -> it converged
-    # "clean" then FATAL'd in play; a 150s window heals it in the same pass.
-    confirm_seconds = max(ctx.args.run_seconds * 2, ctx.args.run_seconds + 25, 150)
+    # "clean" then FATAL'd in play; a wide window heals it in the same pass. Some
+    # titles (565507E4 Crash of the Titans) have a long green-thread-paced loading
+    # phase (~2min) before the first gameplay indirect calls surface, so the floor
+    # is 360s to reach past loading into actual play.
+    confirm_seconds = max(ctx.args.run_seconds * 2, ctx.args.run_seconds + 25, 360)
     # --- Tier 0: convergence receipt = ZERO launches --------------------------
     # A "converged" verdict is a property of the binaries + guest image that ran.
     # Persist it keyed by their hashes: when the same set comes around again (a
@@ -1714,8 +1717,35 @@ SDK_PIN = {
     # fatal abort ("trap diagnostics"), bifurcating table-miss from call-path
     # bugs at zero cost outside the abort path (how the ghost-target loop and
     # the stale-exe chain were root-caused).
-    "rexglue.exe":    "c3c1139dc878c11dffa306ea7867e790d0fd78e94aff7476caa4d4f8777b029d",
-    "rexruntime.dll": "1840f9ad51afa594f95ab84e059758f3873787fa0030dff0313e8c2ba77d3643",
+    # v2.15 (codegen ADDITIVE): [[guest_patches]] manifest support -- community
+    # xenia-canary game-patch byte writes applied to the guest image right after
+    # the XEX loads in codegen, BEFORE analysis, so fixes are baked permanently
+    # into the recompiled native code (first user: Gears of War 3 "Disable
+    # Ambient Occlusion" = the greenish ghost-shadow under upscaling, applied as
+    # a surgical DepthOfField-gate-only subset that keeps AO alive). Empty/absent
+    # section -> byte-identical for every existing project.
+    # v2.16 (RUNTIME, additive/gated): two fixes that take 565507E4 Crash of the
+    # Titans from crash-at-boot to booting + running its renderer, both structured
+    # to not touch any working title:
+    #  (1) GREEN-THREAD HOST-FIBER BRIDGE (kernel commit 7db6198): titles that run
+    #      their own cooperative scheduler on raw KeSetCurrentStackPointers now
+    #      suspend/resume via real host fibers (rex::thread::Fiber) instead of the
+    #      lossy Reenter-unwind, so a green context that RETURNS up its own guest
+    #      chain (yield epilogue) no longer silently exits the thread. Gated
+    #      byte-identical on (fiber_ptr && guest_object()==thread) + same-stack
+    #      early-out -> no pre-fiber fleet title runs a new instruction.
+    #  (2) TITLE-LIVENESS (commit e580b29): the app no longer quits when the guest
+    #      entry thread returns; it waits for all guest-created threads to drain
+    #      (HasRunningGuestThreads), matching 360 semantics. Titles whose main
+    #      thread never returns are unaffected.
+    #  + gpu/shader (commit 29e70b4): stop double-reverting the normalized-coord
+    #      tfetch offset by draw_resolution_scale (it was already guest-size
+    #      normalized). Byte-identical at scale=1; only scaled-texture normalized
+    #      samples at scale>1 change.
+    # rexglue.exe relinks (C++ links non-reproducible) but codegen output is
+    # UNCHANGED from v2.15 -> pin re-generated to the actually-shipped binaries.
+    "rexglue.exe":    "9b62b1a80ad5a7f97ceae9944e07b88691711b46dd80142622eb4e8dd6b45e5b",
+    "rexruntime.dll": "0258f1780356f86e093c767a313c6fde4a2d1f4d65ec5245e921476cf12e79ad",
 }
 
 
