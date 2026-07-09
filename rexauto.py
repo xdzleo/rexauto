@@ -1474,31 +1474,74 @@ def stage_build(ctx):
 
 
 def _autoplay_thread(proc, stop_evt):
-    """While the game runs AND is the foreground window, press menu-advance keys
-    (Enter=START, Space/A=A on the MnK driver) every few seconds so title/menu
-    screens advance unattended -- heal windows then exercise menu->deeper code
-    instead of idling on PRESS START. Never types into other apps (foreground
-    check). Opt out with REXAUTO_NO_AUTOPLAY=1."""
+    """Press menu-advance keys (Enter=START, Space=A -- the MnK driver defaults)
+    every few seconds so title/menu screens advance unattended, and heal windows
+    exercise menu->deeper code instead of idling on PRESS START.
+    IMPLEMENTATION MATTERS: the runtime window is SDL3, which maps keys by
+    HARDWARE SCANCODE -- keybd_event(vk, scan=0) arrives as scancode 0 and SDL
+    sees nothing (the first version of this was invisible to every game). Use
+    SendInput with KEYEVENTF_SCANCODE (Enter=0x1C, Space=0x39) and force the
+    game window to the foreground first (found by pid; SDL only receives key
+    events with focus). Opt out with REXAUTO_NO_AUTOPLAY=1."""
     import ctypes
     import ctypes.wintypes as wt
     user32 = ctypes.windll.user32
-    KEYUP = 0x0002
-    def press(vk):
-        user32.keybd_event(vk, 0, 0, 0)
-        time.sleep(0.05)
-        user32.keybd_event(vk, 0, KEYUP, 0)
+
+    ULONG_PTR = ctypes.c_size_t
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk", wt.WORD), ("wScan", wt.WORD), ("dwFlags", wt.DWORD),
+                    ("time", wt.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+    class INPUT(ctypes.Structure):
+        class U(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT), ("pad", ctypes.c_byte * 40)]
+        _anonymous_ = ("u",)
+        _fields_ = [("type", wt.DWORD), ("u", U)]
+
+    INPUT_KEYBOARD = 1
+    KEYEVENTF_SCANCODE = 0x0008
+    KEYEVENTF_KEYUP = 0x0002
+
+    def press_scan(scan):
+        down = INPUT(type=INPUT_KEYBOARD)
+        down.ki = KEYBDINPUT(0, scan, KEYEVENTF_SCANCODE, 0, 0)
+        up = INPUT(type=INPUT_KEYBOARD)
+        up.ki = KEYBDINPUT(0, scan, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0, 0)
+        user32.SendInput(1, ctypes.byref(down), ctypes.sizeof(INPUT))
+        time.sleep(0.08)
+        user32.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT))
+
+    def find_game_hwnd():
+        target = []
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+        def cb(hwnd, lparam):
+            pid = wt.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == proc.pid and user32.IsWindowVisible(hwnd):
+                target.append(hwnd)
+                return False
+            return True
+        user32.EnumWindows(WNDENUMPROC(cb), 0)
+        return target[0] if target else None
+
+    SC_ENTER, SC_SPACE = 0x1C, 0x39
     t0 = time.time()
     while not stop_evt.is_set() and proc.poll() is None:
         if time.time() - t0 > 15:  # boot/intro grace
-            hwnd = user32.GetForegroundWindow()
-            pid = wt.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value == proc.pid:
-                for vk in (0x0D, 0x20, 0x41):  # Enter, Space, A
-                    if stop_evt.is_set() or proc.poll() is not None:
-                        break
-                    press(vk)
-                    time.sleep(0.7)
+            hwnd = find_game_hwnd()
+            if hwnd:
+                fg = user32.GetForegroundWindow()
+                if fg != hwnd:
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    user32.SetForegroundWindow(hwnd)
+                    time.sleep(0.3)
+                if user32.GetForegroundWindow() == hwnd:
+                    for scan in (SC_ENTER, SC_SPACE, SC_ENTER):
+                        if stop_evt.is_set() or proc.poll() is not None:
+                            break
+                        press_scan(scan)
+                        time.sleep(0.9)
         stop_evt.wait(2.5)
 
 
