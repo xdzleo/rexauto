@@ -27,6 +27,7 @@ locations, PATH, or the env vars REXGLUE / REXSDK_DIR / IDAT / CLANG / CLANGXX /
 VCVARS / JT_REPO.
 """
 import argparse
+import copy
 import glob
 import hashlib
 import json
@@ -152,8 +153,9 @@ def rexglue(ctx, *xargs, env=None, capture=False):
     return subprocess.run(cmd, env=e, cwd=ctx.port)
 
 
-def add_includes(ctx, names):
-    txt = open(ctx.manifest, encoding="utf-8", errors="ignore").read()
+def add_includes(ctx, names, manifest=None):
+    man = manifest or ctx.manifest
+    txt = open(man, encoding="utf-8", errors="ignore").read()
     m = re.search(r'includes\s*=\s*\[([^\]]*)\]', txt)
     cur = re.findall(r'"([^"]+)"', m.group(1)) if m else []
     for n in names:
@@ -164,7 +166,7 @@ def add_includes(ctx, names):
         txt = txt[:m.start()] + newline + txt[m.end():]
     else:
         txt += "\n" + newline + "\n"
-    open(ctx.manifest, "w", encoding="utf-8").write(txt)
+    open(man, "w", encoding="utf-8").write(txt)
 
 
 # ------------------------------------------------------------------------ stages
@@ -893,10 +895,26 @@ def _seed_module_functions(ctx, m):
     fns = os.path.join(ctx.port, "%s_functions.toml" % m["key"])
     if _heal.load_overrides(fns):
         return
-    seed = os.path.join(HERE, "seeds", "%s_functions.toml" % m["key"])
-    if os.path.exists(seed):
+    # Prefer a seed keyed by the module image's sha256 (collision-proof: "gamelogic"
+    # is a generic module name across engines, and a wrong seed registers functions
+    # at addresses that aren't code in THAT module). Key-named seeds stay as the
+    # legacy fallback (eawebkit).
+    seed = None
+    try:
+        h = hashlib.sha256(open(m["xex"], "rb").read()).hexdigest()[:16]
+        cand = os.path.join(HERE, "seeds", "%s_functions.toml" % h)
+        if os.path.exists(cand):
+            seed = cand
+    except OSError:
+        pass
+    if not seed:
+        cand = os.path.join(HERE, "seeds", "%s_functions.toml" % m["key"])
+        if os.path.exists(cand):
+            seed = cand
+    if seed:
         shutil.copyfile(seed, fns)
-        ctx.log("  module '%s': seeded cures from rexauto/seeds" % m["key"])
+        ctx.log("  module '%s': seeded cures from rexauto/seeds (%s)"
+                % (m["key"], os.path.basename(seed)))
     else:
         _heal.write_overrides(fns, {})
 
@@ -937,6 +955,8 @@ def _inject_pch_into_cmake(ctx):
     (they include their own init header). Set REXAUTO_NO_PCH=1 to opt out."""
     if os.environ.get("REXAUTO_NO_PCH"):
         return
+    if os.path.basename(ctx.gen) != "default":  # extra-module view: no own CMake
+        return                                  # target + its init.h lives elsewhere
     cml = os.path.join(ctx.port, "CMakeLists.txt")
     if not os.path.exists(cml):
         return
@@ -965,6 +985,8 @@ def _inject_debug_diet_into_cmake(ctx):
     info only. Appended via target_compile_options so it lands AFTER the
     config-level -g and downgrades it. Idempotent; REXAUTO_FULL_DEBUG=1 opts out."""
     if os.environ.get("REXAUTO_FULL_DEBUG"):
+        return
+    if os.path.basename(ctx.gen) != "default":  # extra-module view: not its own target
         return
     cml = os.path.join(ctx.port, "CMakeLists.txt")
     if not os.path.exists(cml):
@@ -1129,7 +1151,9 @@ def _inject_app_glue(ctx, mods, glue):
             "    for (const rex::PPCImageInfo* _cfg : { %s }) {\n"
             "      if (!_cfg->func_mappings) continue;\n"
             "      if (!dispatcher->InitializeFunctionTable(_cfg->code_base, _cfg->code_size,\n"
-            "                                               _cfg->image_base, _cfg->image_size))\n"
+            "                                               _cfg->image_base, _cfg->image_size,\n"
+            "                                               /*is_entrypoint=*/false,\n"
+            "                                               _cfg->function_table_base))\n"
             "        continue;\n"
             "      for (int i = 0; _cfg->func_mappings[i].guest != 0; ++i)\n"
             "        if (_cfg->func_mappings[i].host)\n"
@@ -1156,6 +1180,129 @@ def _inject_app_glue(ctx, mods, glue):
     ctx.log("  wired %s into %s_app.h" % (" + ".join(what), ctx.name))
 
 
+def _module_view(ctx, m):
+    """A shallow ctx clone whose per-title paths point at an extra module's files,
+    so the entrypoint's full IDA pipeline (stage_jumptables / stage_deepextract /
+    do_codegen) runs verbatim on the module. Env/work/build paths are inherited
+    (same port tree); only the name-derived artifacts diverge. A separate statefile
+    keeps the module's stage marks from clobbering the entrypoint's resumable
+    state; _jt_image is cleared so jumptables never reuses the entrypoint's dump
+    (a different image); log lines are prefixed to stay distinguishable."""
+    mc = copy.copy(ctx)
+    key = m["key"]
+    mc.name = key
+    mc.manifest = os.path.join(ctx.port, "%s_manifest.toml" % key)
+    mc.functions = os.path.join(ctx.port, "%s_functions.toml" % key)
+    mc.switches = os.path.join(ctx.port, "%s_switch_tables.toml" % key)
+    mc.forced = os.path.join(ctx.port, "%s_forced_landings.toml" % key)
+    mc.gen = os.path.join(ctx.port, "generated", key)
+    mc.statefile = os.path.join(ctx.work, ".rexauto_state_%s" % key)
+    mc._jt_image = None
+    base_log = ctx.log
+    mc.log = lambda msg, _b=base_log, _k=key: _b("[mod:%s] %s" % (_k, msg))
+    return mc
+
+
+def _codegen_module(ctx, m):
+    """Recompile one extra module through the SAME jump-table + deep-extract IDA
+    pipeline the entrypoint gets. A companion XEX (e.g. FIFA Street's fifadllzf,
+    Skate 3's EAWebkit) has its own computed branches / jump tables; a bare codegen
+    fails validation ('target not in any function', the 12 fatals on fifadllzf).
+    Reachable only for titles that declare a <name>_modules.toml -> the fleet is
+    untouched (byte-identical)."""
+    mc = _module_view(ctx, m)
+    image = os.path.join(mc.work, "%s_image.bin" % mc.name)
+    mc.log("recompiling companion module through the full IDA pipeline")
+    # 1. Dump the raw decompressed image for IDA. REX_DUMP_IMAGE dumps + exits WITHOUT
+    #    emitting the C++ sources: that is correct here, because a source emit can't
+    #    succeed yet -- the module's own computed branches are unresolved until the
+    #    switch tables below exist, and rexglue emits nothing on a failed Validate.
+    #    Jump-table recovery needs only the raw image (IDA auto-analysis), not the
+    #    sources, so it runs first and breaks the circular dependency.
+    r = rexglue(mc, "--log-level", "trace", "codegen", mc.manifest,
+                env={"REX_DUMP_IMAGE": image}, capture=True)
+    blob = (r.stdout or "") + (r.stderr or "")
+    if os.path.exists(image):
+        bm = re.search(r"base=0x([0-9A-Fa-f]+), size=0x([0-9A-Fa-f]+)", blob)
+        base = int(bm.group(1), 16) if bm else 0x82000000
+        image_end = base + (int(bm.group(2), 16) if bm else 0x900000)
+        secs = re.findall(r"section '([^']+)' at 0x([0-9A-Fa-f]+) size 0x([0-9A-Fa-f]+) exec=(\w+)", blob)
+        exec_secs = [(int(a, 16), int(a, 16) + int(sz, 16))
+                     for _, a, sz, ex in secs if ex.lower() in ("true", "1")]
+        if exec_secs:
+            mc._jt_image = {"image": image, "base": base, "image_end": image_end,
+                            "exec_secs": exec_secs}
+    # 2. IDA jump-table recovery on the raw image -> switch tables. extract_funcs
+    #    finds no sources yet (empty funclist), but IDA's own auto-analysis recovers
+    #    the tables regardless (proven on fifadllzf: 529 tables from a 0-function list).
+    stage_jumptables(mc)
+    # 3. First real codegen: the switch tables now resolve the computed branches, so
+    #    this PASSES and emits generated/<key> (auto-register mops up tail calls).
+    do_codegen(mc)
+    # 4. Deep static extract -- now that the module's sources/init.h exist, the same
+    #    funcmap + vtable data-xref pass the entrypoint gets folds in the functions
+    #    the linear scan missed (before this reorder it silently skipped: no init.h).
+    stage_deepextract(mc)
+    # 5. Re-codegen to fold the deep-extract additions (no-op if it found nothing).
+    do_codegen(mc)
+    if not os.path.exists(os.path.join(mc.gen, "sources.cmake")):
+        raise SystemExit("[rexauto] extra module '%s' codegen failed after IDA "
+                         "recovery -> see %s" % (m["key"], mc.statefile))
+    ctx.log("  module '%s': codegen OK (jump tables recovered) -> generated/%s"
+            % (m["key"], m["key"]))
+
+
+def _relocate_colliding_tables(ctx, mods):
+    """Multi-XEX: the runtime places each module's function-pointer dispatch table
+    at image_base + image_size by default. When a companion's image loads right
+    after the main's (FIFA Street: main [0x82000000,0x821C0000) + companion at
+    0x82300000), the MAIN's table [0x821C0000,~0x82413000) overlaps the companion
+    image -> InitializeFunctionTable fails -> the companion's functions never
+    register -> FATAL on the first inter-module call. Detect that collision from
+    the generated init.h ranges and author an explicit `function_table_base` into
+    the main manifest: a free 64KiB-aligned guest VA above everything (must stay
+    inside the v80000000 heap, < 0x90000000). The SDK's codegen emits
+    REX_FUNC_TABLE_BASE + PPCImageInfo.function_table_base only when the field is
+    present, so titles without it stay byte-identical. Idempotent: an existing
+    manifest value is left alone."""
+    RESERVE = 0x10000  # SDK FunctionDispatcher::kThunkReserveSize
+    HEAP_END = 0x90000000  # v80000000 heap upper bound (AllocFixed would fail past it)
+    man = open(ctx.manifest, encoding="utf-8", errors="ignore").read()
+    if re.search(r"^\s*function_table_base\s*=", man, re.M):
+        return
+    r = _dx.read_ranges(ctx.gen, ctx.name)
+    if not r:
+        return
+    ib, cb, cs, isz = r
+    main_tab = (ib + isz, ib + isz + (cs + RESERVE) * 2)
+    spans = [(ib, ib + isz)]  # every image+table span the main table must dodge
+    collide = False
+    for m in mods:
+        mr = _dx.read_ranges(os.path.join(ctx.port, "generated", m["key"]), m["key"])
+        if not mr:
+            continue
+        mib, mcb, mcs, misz = mr
+        mod_img = (mib, mib + misz)
+        mod_tab = (mib + misz, mib + misz + (mcs + RESERVE) * 2)
+        spans += [mod_img, mod_tab]
+        for lo, hi in (mod_img, mod_tab):
+            if main_tab[0] < hi and main_tab[1] > lo:
+                collide = True
+    if not collide:
+        return
+    base = max(hi for _, hi in spans + [main_tab])
+    base = (base + 0xFFFF) & ~0xFFFF
+    if base + (main_tab[1] - main_tab[0]) > HEAP_END:
+        ctx.log("WARNING: no free guest VA below 0x%X for the main function table "
+                "-> leaving default (companion dispatch will fail)" % HEAP_END)
+        return
+    man = re.sub(r"(\[entrypoint\]\s*\n)",
+                 "\\g<1>function_table_base = 0x%X\n" % base, man, count=1)
+    open(ctx.manifest, "w", encoding="utf-8").write(man)
+    ctx.log("  main function table would collide with a companion module -> "
+            "relocated to 0x%X (function_table_base authored into the manifest)" % base)
+
+
 def setup_extra_modules(ctx):
     """Codegen + wire every extra recompiled module, plus per-title app glue.
     No-op for single-module titles with no appglue.toml (early return below)."""
@@ -1166,14 +1313,9 @@ def setup_extra_modules(ctx):
     for m in mods:
         _author_module_manifest(ctx, m)
         _seed_module_functions(ctx, m)
-        man = os.path.join(ctx.port, "%s_manifest.toml" % m["key"])
-        r = rexglue(ctx, "--log-level", "error", "codegen", man, capture=True)
-        ok = os.path.exists(os.path.join(ctx.port, "generated", m["key"], "sources.cmake"))
-        if r.returncode != 0 or not ok:
-            out = (r.stdout or "") + (r.stderr or "")
-            raise SystemExit("[rexauto] extra module '%s' codegen failed:\n%s"
-                             % (m["key"], "\n".join(out.splitlines()[-10:])))
-        ctx.log("  module '%s': codegen OK -> generated/%s" % (m["key"], m["key"]))
+        _codegen_module(ctx, m)
+    if mods:
+        _relocate_colliding_tables(ctx, mods)
     # extra-module codegen rewrites generated/rexglue.cmake to point at the last extra;
     # the entrypoint codegen in the build loop runs AFTER this and restores it to default.
     if mods:
@@ -1383,6 +1525,29 @@ def _runheal_fingerprint(ctx):
 def stage_runheal(ctx):
     bat = write_build_bat(ctx)
     lo, hi, range_exact = _code_range(ctx)
+    # Multi-XEX: know each extra module's code range so an invalid-function target
+    # inside a companion (e.g. Spider-Man's GameLogic.dll at 0x88080000) is healed
+    # in THAT module's functions.toml + a module re-codegen, instead of being
+    # written off as "uncurable/out-of-image". Empty for single-module titles ->
+    # behavior byte-identical to before.
+    mod_heal = []
+    for m in extra_modules(ctx):
+        mc = _module_view(ctx, m)
+        mlo, mhi, mexact = _code_range(mc)
+        if mexact:
+            mod_heal.append((mc, mlo, mhi))
+
+    def _partition(logged):
+        """(main_addrs, [(module_view, addrs)], uncurable) by owning code range."""
+        main = [a for a in logged if lo <= a < hi and (a & 3) == 0]
+        seen = set(main)
+        hits = []
+        for mc, mlo, mhi in mod_heal:
+            ma = [a for a in logged if a not in seen and mlo <= a < mhi and (a & 3) == 0]
+            if ma:
+                seen.update(ma)
+                hits.append((mc, ma))
+        return main, hits, [a for a in logged if a not in seen]
     if not os.path.exists(ctx.exe):
         # A failure must FAIL (SystemExit, like stage_build) -- a truthy mark would
         # make the next plain pipeline run print "skip runheal (done)" and never
@@ -1474,9 +1639,8 @@ def stage_runheal(ctx):
         # "0x88610000" = {}). Only heal targets that live in this image; report
         # (never "cure") the rest.
         logged = _heal.invalid_functions_ordered(txt)
-        addrs = [a for a in logged if lo <= a < hi and (a & 3) == 0]
-        uncurable = [a for a in logged if a not in set(addrs)]
-        if addrs and uncurable:
+        addrs, mod_hits, uncurable = _partition(logged)
+        if (addrs or mod_hits) and uncurable:
             # Corrupted-continuation guard: after the first no-op'd uncurable call
             # the run executes with corrupt state, so in-range targets logged in
             # the SAME run may be garbage that register_or_seed would enshrine.
@@ -1498,9 +1662,8 @@ def stage_runheal(ctx):
             if not logged2:
                 ctx.log("  fatal-mode run logged nothing (timing nondeterminism); re-observing")
                 continue
-            addrs = [a for a in logged2 if lo <= a < hi and (a & 3) == 0]
-            uncurable = [a for a in logged2 if a not in set(addrs)]
-        if not addrs:
+            addrs, mod_hits, uncurable = _partition(logged2)
+        if not addrs and not mod_hits:
             if uncurable:
                 # Honest non-convergence: discover mode no-op'd calls that a
                 # production run FATALs on; nothing in THIS module cures them.
@@ -1543,12 +1706,24 @@ def stage_runheal(ctx):
                               open(rcpt_path, "w"), indent=1)
             return ctx.mark("runheal", {"iters": it, "alive": alive,
                                         "confirmed_seconds": confirm_seconds})
-        n_reg, n_seed = _heal.register_or_seed(addrs, ctx.functions, ctx.forced, ctx.switches)
-        if n_seed:
-            _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
-        n = n_reg + n_seed
-        ctx.log("heal round %d: target(s) @ %s -> +%d (%d fn, %d landing); rebuilding"
-                % (it, ",".join("0x%X" % a for a in addrs), n, n_reg, n_seed))
+        n = 0
+        if addrs:
+            n_reg, n_seed = _heal.register_or_seed(addrs, ctx.functions, ctx.forced, ctx.switches)
+            if n_seed:
+                _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
+            n = n_reg + n_seed
+            ctx.log("heal round %d: target(s) @ %s -> +%d (%d fn, %d landing); rebuilding"
+                    % (it, ",".join("0x%X" % a for a in addrs), n, n_reg, n_seed))
+        # Targets owned by an extra module: cure in ITS functions.toml and re-codegen
+        # that module (its objects relink into the same exe in the shared rebuild below).
+        for mc, ma in mod_hits:
+            mr, ms = _heal.register_or_seed(ma, mc.functions, mc.forced, mc.switches)
+            if ms:
+                _heal.ensure_manifest_include(mc.manifest, os.path.basename(mc.forced))
+            n += mr + ms
+            mc.log("heal round %d: target(s) @ %s -> +%d (%d fn, %d landing); re-codegen module"
+                   % (it, ",".join("0x%X" % a for a in ma), mr + ms, mr, ms))
+            do_codegen(mc)
         window = ctx.args.run_seconds  # short fast rounds while targets keep coming;
         # the final clean round stretches back to confirm_seconds before converging.
         if n == 0:
@@ -1561,7 +1736,7 @@ def stage_runheal(ctx):
             # unfixable runtime wall at 0x82415F90 when a plain relink converged it.
             # Force one codegen+relink to resync the exe, then re-run. Only if the same
             # address STILL fatals after a clean relink is it a genuine wall.
-            a0 = addrs[0]
+            a0 = (addrs + [a for _, ma in mod_hits for a in ma])[0]
             if a0 not in resynced:
                 resynced.add(a0)
                 ctx.log("  0x%X already registered but still flagged -> resync exe "
@@ -1579,7 +1754,9 @@ def stage_runheal(ctx):
             # so it IS a true entry point -> shrink the containing function with an
             # end-override at the target and re-codegen. Fires only on this exact
             # class (registered + survives resync + a prior list entry spans it).
-            prev = _prev_list_function(ctx, a0)
+            # Shrink applies only to the MAIN module's function list; a module-range
+            # a0 would bisect to main's LAST function and wrongly shrink it.
+            prev = _prev_list_function(ctx, a0) if lo <= a0 < hi else None
             if prev is not None and prev not in shrunk:
                 shrunk.add(prev)
                 ov = _heal.load_overrides_full(ctx.functions)
@@ -1753,8 +1930,22 @@ SDK_PIN = {
     # rexglue.exe nor rexruntime.dll changes (pin stays on the v2.16 binaries;
     # the SimpleSettingsDialog code was already compiled into rexui/rexruntime).
     # Existing ports get the menu on relink; new ports get it automatically.
-    "rexglue.exe":    "9b62b1a80ad5a7f97ceae9944e07b88691711b46dd80142622eb4e8dd6b45e5b",
-    "rexruntime.dll": "0258f1780356f86e093c767a313c6fde4a2d1f4d65ec5245e921476cf12e79ad",
+    # v2.18 (SDK commit af9e790): relocatable per-module function table
+    # (function_table_base) -- the multi-XEX collision cure. When a companion
+    # image loads right after the main's (FIFA Street: fifadllzf at 0x82300000),
+    # the main's dispatch table at image_base+image_size would overlap it and the
+    # companion's functions never register (FATAL 0x82612A48). New optional
+    # [entrypoint] manifest key relocates the table (rexauto authors it
+    # automatically on collision, _relocate_colliding_tables); runtime overlap
+    # check now tests image and table as separate ranges. Emitted ONLY when the
+    # key is present (exists()-gated templates; this inja treats "" as truthy so
+    # an always-present empty value is unsafe) -> fleet codegen byte-identical
+    # (gate 18/18 PASS identical; gears' 1 diff = the v2.17 SSAO guest_patch
+    # post-dating its baseline, re-blessed). Runtime spot-check: gears survived
+    # 360s on the new rexruntime; FIFA main table at 0x86B70000 "(explicit
+    # base)" + companion registers + companion code executes.
+    "rexglue.exe":    "e4f4963906cbbe3f2e4b08b5c2d0bd203a443d50f11c9cf482c7bd1c2021b837",
+    "rexruntime.dll": "5c08096b5432d9dee6b1034f510d5513d3a00c6e8822121138e01f61263e7316",
 }
 
 

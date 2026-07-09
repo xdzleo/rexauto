@@ -1,0 +1,23 @@
+# Boundary/function overrides auto-healed by rexauto.
+# `end` = extend a function the recompiler split mid-flow;
+# `parent` = a chunk (address-taken sub-entry) of a parent function;
+# `{}`  = a function discovered at runtime by the heal loop.
+
+[functions]
+"0x82611F28" = {}
+"0x82611FC0" = {}
+"0x82612A48" = {}
+"0x826BBCF8" = {}
+"0x826DB470" = {}
+"0x8275E510" = {}
+"0x82783960" = {}
+"0x82797AE8" = {}
+"0x8279E5B8" = {}
+"0x82C62350" = {}
+"0x831CE980" = {}
+"0x831CF998" = {}
+"0x831D7800" = {}
+"0x831DA288" = {}
+"0x83804B68" = {}
+"0x83A7BC58" = {}
+"0x83A7BFA0" = {}
