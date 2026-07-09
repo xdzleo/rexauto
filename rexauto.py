@@ -1844,13 +1844,21 @@ def stage_runheal(ctx):
                 mine = [a for a in ub if olo <= a < ohi]
                 if not mine:
                     continue
-                nf = _heal.write_forced(owner.forced, mine)
-                if nf:
+                # register_or_seed routes each target correctly: a landing INSIDE
+                # an existing function -> forced_landings (keeps the routine
+                # whole); a target in an override GAP -> a {} FunctionNode so
+                # graph().getFunction() is non-null and build_b lowers the branch
+                # to a real tail call. A forced-landing alone never creates the
+                # node, so gap targets (crash_mind_over_mutant 0x82476040) stayed
+                # unresolved and re-fataled every run.
+                nr, ns = _heal.register_or_seed(mine, owner.functions, owner.forced, owner.switches)
+                if ns:
                     _heal.ensure_manifest_include(owner.manifest, os.path.basename(owner.forced))
-                    owner.log("  %d unresolved-branch landing(s) forced: %s; rebuilding"
-                              % (nf, ", ".join("0x%X" % a for a in mine)))
+                if nr + ns:
+                    owner.log("  %d unresolved-branch target(s) cured (%d fn, %d landing): %s; rebuilding"
+                              % (nr + ns, nr, ns, ", ".join("0x%X" % a for a in mine)))
                     do_codegen(owner)
-                    forced_new += nf
+                    forced_new += nr + ns
             if forced_new:
                 do_codegen(ctx)  # no-op for main-only fixes; restores rexglue.cmake after module codegen
                 logp, rc = do_build(ctx, bat)
