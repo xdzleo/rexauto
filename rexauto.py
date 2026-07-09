@@ -2215,8 +2215,18 @@ SDK_PIN = {
     # owner-aware shrink, live injector updates. Gate 25/29 byte-identical;
     # the 4 diffs = the day's cured titles (FIFA title screen, sonic intro,
     # halo 3 walls down, forza ported), judged + re-blessed.
-    "rexglue.exe":    "10a624fee5f591aec0dafccb7418bd37d681d2bdea356b2b8d6a1a15ae0dc9a2",
-    "rexruntime.dll": "aeed400d6a25d2b461d006dd3eb878d37da7139f84ef00bf4067eee9eaed640b",
+    # v2.20 (SDK 8d2b8d6) "the runtime walls": VFS longest-match device
+    # resolution (NullDevice shadowed EVERY nested mount -- cache: never
+    # resolved in ANY title; WWE PAC staging validated), XCTD not-compressed
+    # (Bully 913-requery loop dead), GetNativeObject + 20 XMA NULL guards
+    # (Superman 67s->90s), GPU non-vertex fetch-constant bypass (Splosion
+    # draws decode), guest-stack guard-page grace + 512KiB floor
+    # (REX_MIN_STACK_KB), runtime-side autoplay (REX_AUTOPLAY: MnK driver
+    # synthesizes START/A, focus-independent), unresolved-branch heal via
+    # register_or_seed (crash_MoM 80ms -> 360s alive). Gate 25/29
+    # byte-identical; 4 diffs = heal-grown functions.toml, blessed.
+    "rexglue.exe":    "a0b7bc3afae96d726363fc33140e0b8a8ba74f0322e68173c5f74f0c56e66438",
+    "rexruntime.dll": "771dc1c007ec7c171e2302ffdfbc04b9da40a64963f970c83ab478424e21f92b",
 }
 
 
