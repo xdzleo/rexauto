@@ -1744,6 +1744,15 @@ SDK_PIN = {
     #      samples at scale>1 change.
     # rexglue.exe relinks (C++ links non-reproducible) but codegen output is
     # UNCHANGED from v2.15 -> pin re-generated to the actually-shipped binaries.
+    # v2.17 (SDK-source only, PIN UNCHANGED): in-game settings menu (F1) --
+    # ReXApp now wires the curated SimpleSettingsDialog (resolution scale
+    # 720p/1440p/2160p, framerate, fullscreen/vsync, + title-conditional FoV/
+    # ultrawide), with "Apply & Restart" self-relaunching the exe to apply
+    # resolution changes. The wiring lives in the shipped share/rexglue/
+    # rex_app.cpp, which every title compiles into its OWN exe -- so neither
+    # rexglue.exe nor rexruntime.dll changes (pin stays on the v2.16 binaries;
+    # the SimpleSettingsDialog code was already compiled into rexui/rexruntime).
+    # Existing ports get the menu on relink; new ports get it automatically.
     "rexglue.exe":    "9b62b1a80ad5a7f97ceae9944e07b88691711b46dd80142622eb4e8dd6b45e5b",
     "rexruntime.dll": "0258f1780356f86e093c767a313c6fde4a2d1f4d65ec5245e921476cf12e79ad",
 }
