@@ -1473,6 +1473,35 @@ def stage_build(ctx):
     raise SystemExit("build did not converge; see %s" % os.path.join(ctx.work, "_build.log"))
 
 
+def _autoplay_thread(proc, stop_evt):
+    """While the game runs AND is the foreground window, press menu-advance keys
+    (Enter=START, Space/A=A on the MnK driver) every few seconds so title/menu
+    screens advance unattended -- heal windows then exercise menu->deeper code
+    instead of idling on PRESS START. Never types into other apps (foreground
+    check). Opt out with REXAUTO_NO_AUTOPLAY=1."""
+    import ctypes
+    import ctypes.wintypes as wt
+    user32 = ctypes.windll.user32
+    KEYUP = 0x0002
+    def press(vk):
+        user32.keybd_event(vk, 0, 0, 0)
+        time.sleep(0.05)
+        user32.keybd_event(vk, 0, KEYUP, 0)
+    t0 = time.time()
+    while not stop_evt.is_set() and proc.poll() is None:
+        if time.time() - t0 > 15:  # boot/intro grace
+            hwnd = user32.GetForegroundWindow()
+            pid = wt.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == proc.pid:
+                for vk in (0x0D, 0x20, 0x41):  # Enter, Space, A
+                    if stop_evt.is_set() or proc.poll() is not None:
+                        break
+                    press(vk)
+                    time.sleep(0.7)
+        stop_evt.wait(2.5)
+
+
 def run_once(ctx, seconds, discover=False):
     """Launch the game, let it run, kill it; return (newest-this-launch log text, alive).
     discover=True sets REX_HEAL_DISCOVER so the runtime logs+continues on each
@@ -1493,10 +1522,14 @@ def run_once(ctx, seconds, discover=False):
     except OSError as ex:
         ctx.log("  could not launch the game: %s" % ex)
         return "", False
+    ap_stop = threading.Event()
+    if not os.environ.get("REXAUTO_NO_AUTOPLAY"):
+        threading.Thread(target=_autoplay_thread, args=(p, ap_stop), daemon=True).start()
     while time.time() - t0 < seconds:
         if p.poll() is not None:
             break
         time.sleep(0.5)
+    ap_stop.set()
     alive = p.poll() is None
     if alive:
         p.terminate()
@@ -1752,6 +1785,35 @@ def stage_runheal(ctx):
         # (never "cure") the rest.
         logged = _heal.invalid_functions_ordered(txt)
         log_text = txt  # freshest runtime log (for companion auto-detection)
+        # Codegen-baked "Unresolved call from X to Y" fatals: the branch target is
+        # neither a discovered function nor a recovered landing, so the generated
+        # code traps unconditionally -- launching again can never cure it. Force
+        # the target as an in-function landing in the OWNING module (never a {}
+        # split: the forced-landings lesson) and rebuild. crash_mind_over_mutant
+        # sat through 4 identical runs on this class; Forza Horizon hit it at
+        # 0x830ED910 mid-boot.
+        ub = _heal.unresolved_branches_from_runtime(txt)
+        if ub:
+            forced_new = 0
+            for owner, olo, ohi in [(ctx, lo, hi)] + [(mc, mlo, mhi) for mc, mlo, mhi in mod_heal]:
+                mine = [a for a in ub if olo <= a < ohi]
+                if not mine:
+                    continue
+                nf = _heal.write_forced(owner.forced, mine)
+                if nf:
+                    _heal.ensure_manifest_include(owner.manifest, os.path.basename(owner.forced))
+                    owner.log("  %d unresolved-branch landing(s) forced: %s; rebuilding"
+                              % (nf, ", ".join("0x%X" % a for a in mine)))
+                    do_codegen(owner)
+                    forced_new += nf
+            if forced_new:
+                do_codegen(ctx)  # no-op for main-only fixes; restores rexglue.cmake after module codegen
+                logp, rc = do_build(ctx, bat)
+                if rc != 0 or not os.path.exists(ctx.exe):
+                    raise SystemExit("[rexauto] runheal: rebuild failed after forcing %d "
+                                     "unresolved-branch landing(s) -> see %s" % (forced_new, logp))
+                window = ctx.args.run_seconds
+                continue
         addrs, mod_hits, uncurable = _partition(logged)
         if (addrs or mod_hits) and uncurable:
             # Corrupted-continuation guard: after the first no-op'd uncurable call

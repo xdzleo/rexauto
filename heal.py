@@ -176,6 +176,16 @@ def forced_landings_from_log(build_log):
     return sorted(set(int(m.group(3), 16) for m in UNDECL.finditer(txt)))
 
 
+def unresolved_branches_from_runtime(txt):
+    """Targets of runtime 'Unresolved call from X to Y' fatals -- the codegen-baked
+    class where a branch target is neither a discovered function nor a recovered
+    landing, so codegen lowered it to REX_FATAL("Unresolved branch"). The heal loop
+    could never cure it (crash_mind_over_mutant sat through 4 identical runs).
+    Cure = force the target as an in-function landing (never a {} split)."""
+    return sorted({int(m, 16) for m in re.findall(
+        r"Unresolved call from 0x[0-9A-Fa-f]+ to 0x([0-9A-Fa-f]+)", txt)})
+
+
 def load_forced(path):
     """Set of addresses in a `forced_landings = [..]` TOML (empty if absent)."""
     if not os.path.exists(path):
