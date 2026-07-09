@@ -2093,8 +2093,15 @@ SDK_PIN = {
     # post-dating its baseline, re-blessed). Runtime spot-check: gears survived
     # 360s on the new rexruntime; FIFA main table at 0x86B70000 "(explicit
     # base)" + companion registers + companion code executes.
-    "rexglue.exe":    "e4f4963906cbbe3f2e4b08b5c2d0bd203a443d50f11c9cf482c7bd1c2021b837",
-    "rexruntime.dll": "5c08096b5432d9dee6b1034f510d5513d3a00c6e8822121138e01f61263e7316",
+    # v2.19 (SDK commit f5e5ce1) "the never-boots cohort": kernel/VFS answers
+    # (XCTD not-compressed, FILE_DEVICE_DISK, cache0:/cache1: mounts,
+    # delete-on-close honored) + sibling-module imports recompiled as guest
+    # code + rexauto: zero-touch companion autodetect, module setjmp/longjmp,
+    # owner-aware shrink, live injector updates. Gate 25/29 byte-identical;
+    # the 4 diffs = the day's cured titles (FIFA title screen, sonic intro,
+    # halo 3 walls down, forza ported), judged + re-blessed.
+    "rexglue.exe":    "10a624fee5f591aec0dafccb7418bd37d681d2bdea356b2b8d6a1a15ae0dc9a2",
+    "rexruntime.dll": "aeed400d6a25d2b461d006dd3eb878d37da7139f84ef00bf4067eee9eaed640b",
 }
 
 
