@@ -922,7 +922,17 @@ def _seed_module_functions(ctx, m):
 def _inject_extra_modules_into_cmake(ctx, mods):
     cml = os.path.join(ctx.port, "CMakeLists.txt")
     txt = open(cml, encoding="utf-8", errors="ignore").read()
-    if "_rexauto_mod" in txt:   # already injected (manually or by a prior run)
+    keys = " ".join(m["key"] for m in mods)
+    if "_rexauto_mod" in txt:   # already injected -> UPDATE the key list if the
+        # module set changed (modules can be ADDED after the first build: a second
+        # companion declared later, or run-heal's zero-touch auto-detection). A
+        # stale list silently drops the new modules from the exe -- Halo 3's
+        # waveslib codegen'd fine but never compiled/registered, so its heal
+        # looped on an address that could never resolve.
+        new = re.sub(r"foreach\(_rexauto_mod [^)]*\)", "foreach(_rexauto_mod %s)" % keys, txt)
+        if new != txt:
+            open(cml, "w", encoding="utf-8").write(new)
+            ctx.log("  extra-module list in CMakeLists updated -> %s" % keys)
         return
     keys = " ".join(m["key"] for m in mods)
     open(cml, "a", encoding="utf-8").write(
@@ -1106,6 +1116,24 @@ def _inject_app_glue(ctx, mods, glue):
     txt = open(app, encoding="utf-8", errors="ignore").read()
     has_mods = "rexauto: 2nd-module" in txt
     has_glue = "rexauto: appglue" in txt
+    if has_mods and mods:
+        # UPDATE the already-injected block when the module set changed (modules
+        # can be added after the first injection -- a later-declared companion or
+        # run-heal's zero-touch auto-detection). A stale extern/config list means
+        # the new modules' function tables never register at runtime.
+        externs_new = "\n".join('extern const rex::PPCImageInfo %sPPCImageConfig;' % m["symbol_prefix"]
+                                for m in mods)
+        cfgs_new = ", ".join('&%sPPCImageConfig' % m["symbol_prefix"] for m in mods)
+        upd = re.sub(r"(for \(const rex::PPCImageInfo\* _cfg : \{ )[^}]*( \}\))",
+                     lambda mm: mm.group(1) + cfgs_new + mm.group(2), txt, count=1)
+        upd = re.sub(r"(// rexauto: extra recompiled module\(s\) linked into this exe\.\n)"
+                     r"(?:extern const rex::PPCImageInfo \w+PPCImageConfig;\n?)+",
+                     lambda mm: mm.group(1) + externs_new + "\n", upd, count=1)
+        if upd != txt:
+            open(app, "w", encoding="utf-8").write(upd)
+            ctx.log("  extra-module dispatcher list in %s_app.h updated -> %d module(s)"
+                    % (ctx.name, len(mods)))
+            txt = upd
     if (has_mods or not mods) and (has_glue or not glue):
         return  # nothing new to inject
 
@@ -1232,6 +1260,25 @@ def _codegen_module(ctx, m):
         if exec_secs:
             mc._jt_image = {"image": image, "base": base, "image_end": image_end,
                             "exec_secs": exec_secs}
+            # Companion setjmp/longjmp: a module can ship its OWN setjmp pair
+            # (fifadllzf embeds Lua 5.1) and needs the same special codegen the
+            # entrypoint gets -- recompiled as plain code, longjmp is undefined
+            # behavior. FIFA Street: a luaD_throw during the protected lua open
+            # unwound wrongly and leaked a partially-initialized lua_State ->
+            # AV in luaS_newlstr reading G(L)->strt.hash garbage. Detection is
+            # signature-based per-image; no signature -> no write -> no-op.
+            # Runs every build: _author_module_manifest rewrites the module
+            # manifest each pass, so the addresses must be re-applied here.
+            try:
+                import detect_setjmp as _dj
+                sres = _dj.detect(image, exec_secs, base)
+                slj, ssj = sres.get("longjmp_address"), sres.get("setjmp_address")
+                if slj and ssj:
+                    _dj.write_addresses(mc.manifest, longjmp=slj, setjmp=ssj)
+                    mc.log("module setjmp/longjmp detected -> setjmp=0x%X longjmp=0x%X "
+                           "(written to module manifest)" % (ssj, slj))
+            except Exception as ex:
+                mc.log("module setjmp detection skipped (%s)" % ex)
     # 2. IDA jump-table recovery on the raw image -> switch tables. extract_funcs
     #    finds no sources yet (empty funclist), but IDA's own auto-analysis recovers
     #    the tables regardless (proven on fifadllzf: 529 tables from a 0-function list).
@@ -1522,6 +1569,71 @@ def _runheal_fingerprint(ctx):
         return None
 
 
+def _autodetect_companions(ctx, log_text, targets):
+    """Zero-touch multi-XEX: when a production run fatals on addresses OUTSIDE
+    every recompiled module, find which guest-loaded companion XEX contains them.
+    The runtime log records, at load time, a '<file>.dllp / .xexp' patch probe
+    immediately before each 'XEX image loaded at LO-HI' line -- pairing the two
+    yields (module path, image range). A fatal target inside a companion's range
+    + the file on disk being XEX2 => author it into port/<name>_modules.toml,
+    where stage_build's setup_extra_modules recompiles it through the full IDA
+    pipeline (v2.18). Returns the newly-authored module dicts; [] when nothing
+    new (already-declared companions are never re-authored -> the caller's
+    anti-loop: a companion that still fatals AFTER recompilation falls through
+    to the honest production_fatal verdict)."""
+    loads, last_probe = [], None
+    for ln in log_text.splitlines():
+        m = re.search(r"entry not found for '([^']+\.(?:xex|dll|exe))p'", ln, re.I)
+        if m:
+            last_probe = m.group(1)
+            continue
+        m = re.search(r"XEX image loaded at ([0-9A-Fa-f]{8})-([0-9A-Fa-f]{8})", ln)
+        if m:
+            if last_probe:
+                rel = re.sub(r"^\\Device\\[^\\]+\\[^\\]+\\", "", last_probe)
+                loads.append((rel, int(m.group(1), 16), int(m.group(2), 16)))
+            last_probe = None
+    existing_mods = extra_modules(ctx)
+    existing_paths = {os.path.normcase(m["xex"]) for m in existing_mods}
+    existing_keys = {m["key"] for m in existing_mods} | {ctx.name}
+    newmods, seen = [], set()
+    for a in targets:
+        for rel, mlo, mhi in loads:
+            if not (mlo <= a < mhi) or rel.lower() == "default.xex" or rel in seen:
+                continue
+            path = os.path.join(ctx.game, rel.replace("\\", os.sep))
+            if os.path.normcase(path) in existing_paths:
+                continue
+            try:
+                if open(path, "rb").read(4) != b"XEX2":
+                    continue
+            except OSError:
+                continue
+            key = re.sub(r"[^a-z0-9]", "", os.path.splitext(os.path.basename(rel))[0].lower()) or "mod"
+            if key[0].isdigit():
+                key = "m" + key
+            while key in existing_keys:
+                key += "x"
+            existing_keys.add(key)
+            seen.add(rel)
+            newmods.append({"key": key, "rel": rel.replace("\\", "/"),
+                            "lo": mlo, "hi": mhi})
+    if not newmods:
+        return []
+    cfgp = os.path.join(ctx.port, "%s_modules.toml" % ctx.name)
+    body = open(cfgp, encoding="utf-8", errors="ignore").read() if os.path.exists(cfgp) else (
+        "# Extra recompilable guest modules beyond the entrypoint -- AUTO-DETECTED by\n"
+        "# rexauto run-heal: a production run fataled on calls landing inside these\n"
+        "# guest-loaded companion XEX images (probe + 'XEX image loaded' log pairs).\n")
+    for m in newmods:
+        body += ('\n[[modules]]\nkey = "%s"\nname = "%s"\nxex = "%s"\n'
+                 'symbol_prefix = "%s_"\n' % (m["key"], m["key"], m["rel"], m["key"]))
+        ctx.log("  companion XEX auto-detected: %s @ 0x%X-0x%X (fatal target inside) "
+                "-> authored into %s" % (m["rel"], m["lo"], m["hi"], os.path.basename(cfgp)))
+    open(cfgp, "w", encoding="utf-8").write(body)
+    return newmods
+
+
 def stage_runheal(ctx):
     bat = write_build_bat(ctx)
     lo, hi, range_exact = _code_range(ctx)
@@ -1639,6 +1751,7 @@ def stage_runheal(ctx):
         # "0x88610000" = {}). Only heal targets that live in this image; report
         # (never "cure") the rest.
         logged = _heal.invalid_functions_ordered(txt)
+        log_text = txt  # freshest runtime log (for companion auto-detection)
         addrs, mod_hits, uncurable = _partition(logged)
         if (addrs or mod_hits) and uncurable:
             # Corrupted-continuation guard: after the first no-op'd uncurable call
@@ -1662,9 +1775,30 @@ def stage_runheal(ctx):
             if not logged2:
                 ctx.log("  fatal-mode run logged nothing (timing nondeterminism); re-observing")
                 continue
+            log_text = txt2
             addrs, mod_hits, uncurable = _partition(logged2)
         if not addrs and not mod_hits:
             if uncurable:
+                # Zero-touch multi-XEX: the fatal may be a call into a companion
+                # XEX the guest loaded but we never recompiled. Detect it from
+                # this run's own log (probe + "XEX image loaded" pairs), author
+                # it into <name>_modules.toml, rebuild (stage_build runs the new
+                # module through the full IDA pipeline), and keep healing. Only
+                # modules NOT already declared are authored, so a companion that
+                # STILL fatals after recompilation falls through to the honest
+                # verdict below instead of looping.
+                newmods = _autodetect_companions(ctx, log_text, uncurable)
+                if newmods:
+                    ctx.log("  %d companion XEX(s) auto-detected -> rebuilding with "
+                            "them recompiled" % len(newmods))
+                    stage_build(ctx)
+                    known = {mc.name for mc, _, _ in mod_heal}
+                    for m in extra_modules(ctx):
+                        mc = _module_view(ctx, m)
+                        mlo, mhi, mexact = _code_range(mc)
+                        if mexact and mc.name not in known:
+                            mod_heal.append((mc, mlo, mhi))
+                    continue
                 # Honest non-convergence: discover mode no-op'd calls that a
                 # production run FATALs on; nothing in THIS module cures them.
                 verdict = ("recompilation of this module found no curable targets, but "
@@ -1754,20 +1888,35 @@ def stage_runheal(ctx):
             # so it IS a true entry point -> shrink the containing function with an
             # end-override at the target and re-codegen. Fires only on this exact
             # class (registered + survives resync + a prior list entry spans it).
-            # Shrink applies only to the MAIN module's function list; a module-range
-            # a0 would bisect to main's LAST function and wrongly shrink it.
-            prev = _prev_list_function(ctx, a0) if lo <= a0 < hi else None
+            # Owner-aware: a module-range a0 shrinks in THAT module's functions.toml
+            # (Halo 3 waveslib 0x8A061018 was this class); its funclist is refreshed
+            # first -- module funclists are written PRE-emit (0 functions), so the
+            # neighbour bisect needs a post-emit regeneration.
+            owner = ctx if lo <= a0 < hi else None
+            if owner is None:
+                for omc, omlo, omhi in mod_heal:
+                    if omlo <= a0 < omhi:
+                        owner = omc
+                        if ctx.env.get("python") and ctx.env.get("jt_repo"):
+                            run([ctx.env["python"],
+                                 os.path.join(ctx.env["jt_repo"], "src", "extract_funcs.py"),
+                                 omc.gen, "-o",
+                                 os.path.join(omc.work, "%s_functions_list.txt" % omc.name)])
+                        break
+            prev = _prev_list_function(owner, a0) if owner is not None else None
             if prev is not None and prev not in shrunk:
                 shrunk.add(prev)
-                ov = _heal.load_overrides_full(ctx.functions)
+                ov = _heal.load_overrides_full(owner.functions)
                 cur = ov.get(prev) or {}
                 if cur.get("end") is None or cur["end"] > a0:
                     cur["end"] = a0
                     ov[prev] = cur
-                    _heal.write_overrides_full(ctx.functions, ov)
-                    ctx.log("  0x%X lies inside 0x%X's emitted body -> shrink it with "
-                            "end=0x%X and retry (absorbed-gap/vtable-thunk class)" % (a0, prev, a0))
-                    do_codegen(ctx)
+                    _heal.write_overrides_full(owner.functions, ov)
+                    owner.log("  0x%X lies inside 0x%X's emitted body -> shrink it with "
+                              "end=0x%X and retry (absorbed-gap/vtable-thunk class)" % (a0, prev, a0))
+                    do_codegen(owner)
+                    if owner is not ctx:
+                        do_codegen(ctx)  # restore generated/rexglue.cmake to the entrypoint
                     logp, rc = do_build(ctx, bat)
                     if rc == 0 and os.path.exists(ctx.exe):
                         continue
