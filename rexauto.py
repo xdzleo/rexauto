@@ -1552,10 +1552,16 @@ def run_once(ctx, seconds, discover=False):
     logdir = os.path.join(ctx.builddir, "logs")
     before = set(glob.glob(os.path.join(logdir, "*.log")))
     t0 = time.time()
-    env = None
+    env = dict(os.environ)
     if discover:
-        env = dict(os.environ)
         env["REX_HEAL_DISCOVER"] = "1"
+    # Runtime-side autoplay: the MnK driver synthesizes periodic START/A presses
+    # (REX_AUTOPLAY, SDK mnk_input_driver.cpp) so unattended windows advance
+    # title/menu screens. Works without window focus -- OS-level key injection
+    # (the first two attempts) was unreliable: SDL maps by scancode, background
+    # processes can't steal foreground, and GetState zeroes input when unfocused.
+    if not os.environ.get("REXAUTO_NO_AUTOPLAY"):
+        env["REX_AUTOPLAY"] = "1"
     try:
         p = subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir, env=env,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1565,14 +1571,10 @@ def run_once(ctx, seconds, discover=False):
     except OSError as ex:
         ctx.log("  could not launch the game: %s" % ex)
         return "", False
-    ap_stop = threading.Event()
-    if not os.environ.get("REXAUTO_NO_AUTOPLAY"):
-        threading.Thread(target=_autoplay_thread, args=(p, ap_stop), daemon=True).start()
     while time.time() - t0 < seconds:
         if p.poll() is not None:
             break
         time.sleep(0.5)
-    ap_stop.set()
     alive = p.poll() is None
     if alive:
         p.terminate()
