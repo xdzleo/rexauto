@@ -406,14 +406,34 @@ def stage_jumptables(ctx):
     cache_hit = False
     cache_dir = None
     if not os.environ.get("REXAUTO_NO_IDA_CACHE"):
+        # Key the cache on the CONTENT of the scripts that determine the
+        # analysis, not the repo revision: a xenon-jumptables commit that
+        # doesn't touch the analysis code (closure_cert, extract_funcs, docs,
+        # lint) used to invalidate the whole fleet's cached .i64 analyses --
+        # minutes of serial IDA per module re-paid for nothing (three tooling
+        # commits on 10/jul forced fifadllzf 29MB + halo's 4 waves modules to
+        # re-analyze). Falls back to the git rev if the files are unreadable.
         jt_rev = ""
         try:
-            r = run(["git", "-C", ctx.env["jt_repo"], "rev-parse", "HEAD"],
-                    capture_output=True, text=True)
-            jt_rev = (r.stdout or "").strip()
+            import hashlib as _hl
+            h = _hl.sha256()
+            for s in ("ida_jumptables.py", "deep_extract.py", "recover.py", "gen_toml.py"):
+                p = os.path.join(ctx.env["jt_repo"], "src", s)
+                if os.path.exists(p):
+                    h.update(open(p, "rb").read())
+            jt_rev = h.hexdigest()
         except Exception:
-            pass
-        key = "%s-%x-%x-%s" % (_sha256(image)[:20], text_start, text_end, jt_rev[:12])
+            try:
+                r = run(["git", "-C", ctx.env["jt_repo"], "rev-parse", "HEAD"],
+                        capture_output=True, text=True)
+                jt_rev = (r.stdout or "").strip()
+            except Exception:
+                pass
+        # The function list SEEDS the analysis (cfg "functions"), so it is an
+        # analysis input too: today it went 0 -> 101426 entries for fifadllzf,
+        # and a hit keyed without it would have replayed the 0-seed analysis.
+        key = "%s-%x-%x-%s-%s" % (_sha256(image)[:20], text_start, text_end, jt_rev[:12],
+                                  _sha256(funcs)[:12])
         cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "ida", key)
         c_toml, c_i64 = os.path.join(cache_dir, "switch_tables.toml"), os.path.join(cache_dir, "image.i64")
         if os.path.exists(c_toml) and os.path.exists(c_i64):
@@ -452,7 +472,7 @@ def stage_jumptables(ctx):
     ctx.mark("jumptables", {"tables": n})
 
 
-def write_build_bat(ctx):
+def write_build_bat(ctx, parallel=None):
     bat = os.path.join(ctx.work, "_build.bat")
     sdk = ctx.env["sdk"].replace("\\", "/")
     # RelWithDebInfo by default: same optimization as Release but with symbols +
@@ -462,19 +482,40 @@ def write_build_bat(ctx):
     # for the codegen gate. Set REXAUTO_BUILD_TYPE=Release for a stripped, smaller
     # distribution build.
     build_type = os.environ.get("REXAUTO_BUILD_TYPE", "RelWithDebInfo")
+    configure = ('cmake --preset win-amd64-release -DCMAKE_BUILD_TYPE=%s '
+                 # map imported libs (spdlog/fmt) to their Release variant under
+                 # RelWithDebInfo, else CMake links spdlogd.lib (_ITERATOR_DEBUG_LEVEL=2)
+                 # against our IDL=0 objects -> lld-link /failifmismatch. Harmless for Release.
+                 '-DCMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO=Release -DCMAKE_C_COMPILER="%s" '
+                 '-DCMAKE_CXX_COMPILER="%s" -DCMAKE_PREFIX_PATH="%s" '
+                 '-Drexglue_DIR="%s/lib/cmake/rexglue"'
+                 % (build_type, ctx.env["clang"].replace("\\", "/"),
+                    ctx.env["clangxx"].replace("\\", "/"), sdk, sdk))
+    # Perf win #4 (strip per-round reconfigure): every heal round used to pay a
+    # full `cmake --preset` (~5-15s) even though nothing about the configuration
+    # changed. The bat now configures only when the build dir has no
+    # CMakeCache.txt; a CHANGE in configure inputs (build type, compilers, SDK
+    # path) is detected here python-side via a stamp file and forces a fresh
+    # configure by deleting the cache. Output-neutral: the configure command is
+    # byte-identical when it does run.
+    bdir = os.path.join(ctx.port, "out", "build", "win-amd64-release")
+    stamp = os.path.join(ctx.work, "_configure.stamp")
+    old = open(stamp, encoding="utf-8").read() if os.path.exists(stamp) else None
+    if old != configure:
+        try:
+            os.remove(os.path.join(bdir, "CMakeCache.txt"))
+        except OSError:
+            pass
+        open(stamp, "w", encoding="utf-8").write(configure)
     lines = [
         "@echo off",
         'call "%s" >nul' % ctx.env["vcvars"],
         'cd /d "%s"' % ctx.port,
-        ('cmake --preset win-amd64-release -DCMAKE_BUILD_TYPE=%s '
-         # map imported libs (spdlog/fmt) to their Release variant under
-         # RelWithDebInfo, else CMake links spdlogd.lib (_ITERATOR_DEBUG_LEVEL=2)
-         # against our IDL=0 objects -> lld-link /failifmismatch. Harmless for Release.
-         '-DCMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO=Release -DCMAKE_C_COMPILER="%s" '
-         '-DCMAKE_CXX_COMPILER="%s" -DCMAKE_PREFIX_PATH="%s" '
-         '-Drexglue_DIR="%s/lib/cmake/rexglue"'
-         % (build_type, ctx.env["clang"].replace("\\", "/"), ctx.env["clangxx"].replace("\\", "/"), sdk, sdk)),
-        "cmake --build out/build/win-amd64-release --parallel -- -k 0",
+        'if not exist "out\\build\\win-amd64-release\\CMakeCache.txt" (',
+        "  " + configure,
+        ")",
+        "cmake --build out/build/win-amd64-release --parallel%s -- -k 0" % (
+            " %d" % parallel if parallel else ""),
         # capture the build's errorlevel BEFORE echo resets it -- `echo RC=...`
         # used to be the last command, so the bat's exit code was ALWAYS 0 and
         # a failed heal-round rebuild silently relaunched the stale exe (the
@@ -1448,15 +1489,34 @@ def stage_build(ctx):
         fetch_gabarito(ctx)
     setup_extra_modules(ctx)   # codegen + wire any extra recompiled modules (no-op if none)
     last_ends = None
+    oom_parallel = None
+    skip_codegen = False
     for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
         ctx.log("codegen + build (attempt %d/%d)" % (attempt, MAX_BUILD_ATTEMPTS))
-        do_codegen(ctx)
+        if skip_codegen:
+            skip_codegen = False  # OOM retry: generated/ is already current
+        else:
+            do_codegen(ctx)
         logp, rc = do_build(ctx, bat)
         txt = _heal._read_text(logp)
         if rc == 0 and os.path.exists(ctx.exe):
             write_game_root(ctx)
             ctx.log("build OK -> %s" % ctx.exe)
             return ctx.mark("build", {"exe": ctx.exe})
+        if "LLVM ERROR: out of memory" in txt:
+            # Giant-module TUs (~2MB generated C++ each + a multi-MB PCH) at the
+            # default parallelism (cores+2 = 18 concurrent clangs) can exceed
+            # physical RAM -- fifadllzf hit this twice on 31GB (build died at
+            # 214/215). The objs already built persist, so retrying the
+            # INCREMENTAL build at reduced -j only recompiles the OOM'd tail.
+            # Halve until 4; the bat keeps the reduced value for the rest of
+            # this pipeline (heal-round rebuilds inherit the safe -j).
+            oom_parallel = max(4, (oom_parallel or 18) // 2)
+            bat = write_build_bat(ctx, parallel=oom_parallel)
+            skip_codegen = True  # generated/ didn't change; only the build OOM'd
+            ctx.log("  clang OUT OF MEMORY (too many concurrent frontends) -> "
+                    "retrying incrementally with --parallel %d" % oom_parallel)
+            continue
         if "use of undeclared label" in txt:
             # Two undeclared-label classes: (a) a jump-table landing the SDK's heuristic
             # under-recovered -> force the SDK to recover it as an in-function block
