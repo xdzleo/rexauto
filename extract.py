@@ -96,6 +96,26 @@ class Stfs:
             bi = bi + 1 if contiguous else self.next_block(bi)
         return bytes(out)
 
+    def read_chain_to(self, out_file, start, length, contiguous):
+        """Streaming read_chain: write the chain straight to a file object and
+        return the byte count. read_chain materializes the WHOLE file in memory
+        (plus a full copy at the final bytes() -- 2x), which MemoryErrors on
+        multi-GB entries (GTA V's install part0-3.rpf are ~2.1GB each). Same
+        chain walk, constant memory."""
+        written = 0
+        bi, remaining = start, length
+        while remaining and bi != END:
+            n = min(BLOCK, remaining)
+            self.f.seek(self.block_to_offset(bi))
+            chunk = self.f.read(n)  # count what was READ: a truncated package
+            out_file.write(chunk)   # reads short past EOF, and the caller's
+            written += len(chunk)   # short-file audit must still catch it
+            if len(chunk) < n:
+                break
+            remaining -= n
+            bi = bi + 1 if contiguous else self.next_block(bi)
+        return written
+
     def file_table(self):
         """All entries in table order (parent links index into this list)."""
         entries = []
@@ -696,15 +716,17 @@ def extract_container(src, out_dir, log=print):
                 continue
             if not (os.path.exists(dst) and os.path.getsize(dst) == e["length"]):
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
-                # read_chain reads past-EOF blocks as empty, so a TRUNCATED package
-                # (incomplete download) silently yields short/0-byte files -- the
-                # kind that later costs hours as a mystery boot hang. Audit it here.
-                data = s.read_chain(e["start"], e["length"], e["contiguous"])
+                # Streaming (constant memory): read_chain materializes the whole
+                # file TWICE (bytearray + final bytes()), which MemoryErrors on
+                # multi-GB entries (GTA V install part rpfs are ~2.1GB each).
+                # The truncation audit stays: a TRUNCATED package (incomplete
+                # download) reads short past EOF and must fail loudly, not
+                # yield the silent 0-byte files that cost hours on Korra.
                 with open(dst, "wb") as o:
-                    o.write(data)
-                written += len(data)
-                if len(data) != e["length"]:
-                    short_files.append((rel, e["length"], len(data)))
+                    got = s.read_chain_to(o, e["start"], e["length"], e["contiguous"])
+                written += got
+                if got != e["length"]:
+                    short_files.append((rel, e["length"], got))
             if e["name"].lower() == "default.xex":
                 xex = dst
         log("extracted assets (%.1f MB written) -> %s" % (written / 1024 / 1024, out_dir))
