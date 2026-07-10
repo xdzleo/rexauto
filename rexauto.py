@@ -1330,7 +1330,24 @@ def _codegen_module(ctx, m):
     # 2. IDA jump-table recovery on the raw image -> switch tables. extract_funcs
     #    finds no sources yet (empty funclist), but IDA's own auto-analysis recovers
     #    the tables regardless (proven on fifadllzf: 529 tables from a 0-function list).
-    stage_jumptables(mc)
+    #    ONE-SHOT like deep-extract: this runs on EVERY stage_build, and the cache
+    #    key includes the funclist hash -- every heal round that adds a module cure
+    #    changes the funclist, misses the cache, and re-paid ~8min of serial IDA
+    #    (defining 101k functions on fifadllzf) per build. The tables are recovered
+    #    from the raw image; heal-added functions don't need table re-analysis
+    #    (build_bctr discovery-trap + forced landings cover their computed branches).
+    #    The manifest is rewritten every pass (_author_module_manifest), so the
+    #    include wiring stage_jumptables would do must be re-applied on the skip.
+    jt_prev = mc.load_state().get("jumptables")
+    jt_done = isinstance(jt_prev, dict) and "tables" in jt_prev
+    if jt_done and os.path.exists(mc.switches) and os.environ.get("REXAUTO_MODULE_JT") != "force":
+        add_includes(mc, ["%s_switch_tables.toml" % mc.name])
+        if os.path.exists(mc.forced) and os.path.getsize(mc.forced) > 0:
+            _heal.ensure_manifest_include(mc.manifest, os.path.basename(mc.forced))
+        mc.log("jump tables already recovered (%s tables) -> skip re-analysis "
+               "(REXAUTO_MODULE_JT=force to re-run)" % jt_prev.get("tables"))
+    else:
+        stage_jumptables(mc)
     # 3. First real codegen: the switch tables now resolve the computed branches, so
     #    this PASSES and emits generated/<key> (auto-register mops up tail calls).
     do_codegen(mc)
