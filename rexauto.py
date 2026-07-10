@@ -473,6 +473,13 @@ def stage_jumptables(ctx):
 
 
 def write_build_bat(ctx, parallel=None):
+    # A clang-OOM lesson (see the "LLVM ERROR: out of memory" handlers) is
+    # PERSISTENT: once a port's giant TUs prove they can't take the default
+    # 18 concurrent frontends, every later bat regeneration -- heal-loop,
+    # re-runs, module builds sharing the work dir -- inherits the reduced -j
+    # instead of re-discovering the crash. Explicit `parallel` still wins.
+    if parallel is None:
+        parallel = ctx.load_state().get("build_parallel")
     bat = os.path.join(ctx.work, "_build.bat")
     sdk = ctx.env["sdk"].replace("\\", "/")
     # RelWithDebInfo by default: same optimization as Release but with symbols +
@@ -1530,7 +1537,8 @@ def stage_build(ctx):
             # INCREMENTAL build at reduced -j only recompiles the OOM'd tail.
             # Halve until 4; the bat keeps the reduced value for the rest of
             # this pipeline (heal-round rebuilds inherit the safe -j).
-            oom_parallel = max(4, (oom_parallel or 18) // 2)
+            oom_parallel = max(4, (oom_parallel or ctx.load_state().get("build_parallel") or 18) // 2)
+            ctx.mark("build_parallel", oom_parallel)  # persistent lesson (write_build_bat reads it)
             bat = write_build_bat(ctx, parallel=oom_parallel)
             skip_codegen = True  # generated/ didn't change; only the build OOM'd
             ctx.log("  clang OUT OF MEMORY (too many concurrent frontends) -> "
@@ -2139,10 +2147,19 @@ def stage_runheal(ctx):
         # relink racing the just-killed game process still holding the exe); a second
         # consecutive non-label failure is a real break -- stop burning rebuilds.
         plain_fails = 0
-        for _pass in range(3):
+        for _pass in range(4):
             if rc == 0 and os.path.exists(ctx.exe):
                 break
-            if "use of undeclared label" in _heal._read_text(logp):
+            _txt = _heal._read_text(logp)
+            if "LLVM ERROR: out of memory" in _txt:
+                # Same auto-fix as stage_build: halve -j, persist the lesson,
+                # retry incrementally (objs persist; generated/ unchanged).
+                plain_fails = 0
+                _oomj = max(4, (ctx.load_state().get("build_parallel") or 18) // 2)
+                ctx.mark("build_parallel", _oomj)
+                bat = write_build_bat(ctx, parallel=_oomj)
+                ctx.log("  clang OUT OF MEMORY in heal rebuild -> retrying with --parallel %d" % _oomj)
+            elif "use of undeclared label" in _txt:
                 plain_fails = 0
                 if _heal.write_forced(ctx.forced, _heal.forced_landings_from_log(logp)):
                     _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
