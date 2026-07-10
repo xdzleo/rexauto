@@ -1,5 +1,68 @@
 # Changelog
 
+## 2.23.0 — "sibling imports bound" (2026-07-10)
+
+**The Halo 3 "L360" wall, root-caused and fixed structurally (SDK 81ccf82).**
+A guest module's imports from a SIBLING guest module (L360.dll <-
+WavesLibDLL.dll) were recompiled as raw XEX placeholder thunks — the 360
+loader rewrites those at bind time, but recompiled code compiles the
+pre-bind bytes: the leftover `mtctr r11; bctr` used a stale r11 that pointed
+back into the CALLER, so the first sibling call recursed caller<->thunk until
+guest stack overflow (~3ms after the Waves DLLs load). Fix on both sides:
+codegen patches each unresolved-import thunk in the loaded image into a real
+IAT-slot dispatch (`lis/lwz r11, slot; mtctr; bctr` — exactly 16 bytes) and
+registers it as a function; the runtime binds the type-0 slots against the
+sibling's export table after every module load, before DllMain, load-order
+independent. Single-module titles have none of these: fleet gate 30/30
+byte-identical by construction.
+
+**The pipeline got dramatically cheaper on multi-XEX (the fifadllzf case
+study, 101k funcs):**
+- companion deep-extract and jump-table recovery are now ONE-SHOT per module
+  (they re-ran on every build: ~8min of serial IDA + ~15min of codegen
+  probes re-paid per heal round; now a module heal round is codegen +
+  incremental build + run — zero IDA)
+- the pure-add gate skips its opening baseline probe when the caller just
+  codegen'd (284s) and the fold re-codegen when nothing was accepted (284s)
+- clang OOM is an auto-fixed build failure: halve --parallel, retry
+  incrementally, and the lesson PERSISTS in the port statefile (heal-loop
+  rebuilds inherit it; the heal loop has the same handler)
+- heal rounds no longer pay a full cmake reconfigure (configure only when
+  CMakeCache.txt is missing; input changes force it via a stamp)
+- the IDA cache key is content-based (analysis scripts + funclist), so
+  tooling commits in xenon-jumptables stop invalidating the fleet's cache
+- STFS extraction streams (constant memory) — a 2.1GB entry (GTA V install
+  parts) MemoryError'd the old whole-file read
+
+**Multi-disc installs: the GTA V "insert installation disc" wall, killed
+end-to-end.** An IDA decompile of the game's install state machine
+(sub_8299EE40) + xenia-canary source + a working xenia session log pinned
+the full chain, and each link got its fix:
+1. `XamContentCreateEnumeratorInternal` implemented (was a stub — the
+   install discovery enumerated EMPTY and the game asked for the disc);
+2. the game volume answers `FILE_DEVICE_CD_ROM` (retail from-disc branch;
+   answered DISK the game took the installed-to-HDD-build path);
+3. content packages stage EXTRACTED in the real content root
+   (`Documents/<title>/0000000000000000/<title_id>/00000002/<pkg>/`) with
+   `.header` files generated from the true PIRS metadata ("gtav - part0");
+4. content-mount device paths carried a trailing separator that broke
+   `<pkg>:\partN.rpf` resolution (double backslash = empty path component);
+5. `XamSwapDisc` now signals its completion KEVENT — the one-arg stub
+   swallowed the handle, so after the install gate PASSED the game waited
+   forever ("stuck loading").
+Result: GTA V streams from its mounted install packages and reaches the
+loading screen; remaining walls are ordinary run-heal cures. The extractor's
+STFS reader streams now (constant memory — the 2.1GB part rpfs MemoryError'd
+the old whole-file read, truncation audit preserved). Full `--install-disc`
+automation lands next.
+
+xenon-jumptables (live-referenced): closure_cert splitimm exactness — the
+whole 30-port fleet now certifies ZERO static holes; extract_funcs matches
+companion-module prefixed symbols (the empty-known-list root cause) and
+gained a 65x init.h fast path.
+
+SDK_PIN -> 81ccf82 binaries. Gate: 30/30 codegen byte-identical.
+
 ## 2.22.0 — "silent-miscompile guard" (2026-07-10)
 
 The ">100%" axis: hunting codegen that is WRONG but never crashes (run-heal

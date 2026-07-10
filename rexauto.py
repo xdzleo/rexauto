@@ -2366,8 +2366,23 @@ SDK_PIN = {
     # regression-tested against the pre-fix pattern). The other 4 conclave
     # "bugs" (32-bit carry, CR0, vcmpbfp NaN, denormal flush) were ground-truth
     # re-verified as DELIBERATE, game-validated choices -- left untouched.
-    "rexglue.exe":    "0d69c737a0ff02f9e82007afe8cc801e45bdc2d652efea55d407668d4dc78c62",
-    "rexruntime.dll": "232fad8b75d8d43b59b2171be386499d308fb9f1d0717345bb4bcf689725883d",
+    # v2.23 (SDK db6bd1d) "sibling imports bound + the install-disc flow":
+    # CODEGEN+RUNTIME 81ccf82 sibling-import binding (Halo 3 L360 root cause:
+    # raw placeholder thunks looped caller<->thunk to stack overflow; now
+    # patched to IAT-slot dispatch + runtime binds type-0 slots per module
+    # load). RUNTIME: XamContentCreateEnumeratorInternal implemented (GTA V's
+    # install discovery -- was a stub, enumeration succeeded empty ->
+    # "insert installation disc"); game volume answers FILE_DEVICE_CD_ROM
+    # (retail from-disc branch); content-mount device path had a trailing
+    # separator that broke "<pkg>:\file" resolution; XamSwapDisc signals its
+    # completion KEVENT (one-arg stub swallowed the handle -> eternal wait
+    # after the install gate passed). Chain verified by IDA decompile of GTA
+    # V's install state machine (sub_8299EE40) + live runs: game now streams
+    # from mounted install packages and reaches its loading screen. Gate
+    # 30/30 byte-identical (fifa flag = same-day heal growth, proven under
+    # old rexglue, re-blessed).
+    "rexglue.exe":    "e05bb6ed4c8ba4a76a5d39c1095688ea93cf2c95ed1babb07012147be2eacc22",
+    "rexruntime.dll": "b5c8e9ae0de3371d71ded06d0dfe11734db679fedc9af4ba364c35963709c143",
 }
 
 
