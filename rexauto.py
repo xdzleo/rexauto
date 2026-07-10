@@ -1389,6 +1389,21 @@ def stage_deepextract(ctx):
         return ctx.mark("deepextract", {"skipped": "no-i64-or-ranges"})
     ib, cb, cs, isz = ranges
     funclist = os.path.join(ctx.work, "%s_functions_list.txt" % ctx.name)
+    # The known-set must reflect the CURRENT generated sources. For a companion
+    # module, stage_jumptables ran before any sources existed (step 2 of
+    # _codegen_module) and wrote an EMPTY funclist; feeding that to deep_extract
+    # made every already-emitted function a "candidate" (fifadllzf: 92188) and
+    # the pure-add gate rightly rejected the lot -- accepted=0, deep-extract a
+    # no-op for every companion, real cures (FIFA 0x827838A0) discarded with the
+    # noise. Refresh via the same extract_funcs the jumptables stage uses
+    # whenever the list is missing/empty but sources exist; healthy entrypoints
+    # (non-empty list) are untouched.
+    if (not os.path.exists(funclist) or os.path.getsize(funclist) == 0) \
+            and os.path.exists(os.path.join(ctx.gen, "sources.cmake")):
+        rf = run([ctx.env["python"], os.path.join(ctx.env["jt_repo"], "src", "extract_funcs.py"),
+                  ctx.gen, "-o", funclist])
+        n = sum(1 for l in open(funclist) if l.strip()) if os.path.exists(funclist) else 0
+        ctx.log("deep-extract: refreshed empty funclist from generated sources (%d entries)" % n)
     workcopy = os.path.join(ctx.work, "%s_deepx.i64" % ctx.name)  # NEVER open the original
     cfg = os.path.join(ctx.work, "%s_deepx_cfg.json" % ctx.name)
     outjson = os.path.join(ctx.work, "%s_deepx.json" % ctx.name)
@@ -2228,8 +2243,18 @@ SDK_PIN = {
     # bcctr tail recovery, guest-stack-free-on-exit, spinlock self-deadlock fix,
     # xex2_version MSB packing, + the achievement-tracking backend (XAM unlock
     # reporting; overlay UI deferred). Runtime spot-check: skate3.
-    "rexglue.exe":    "b9658e8834d0dde028de71427c1a9c969d8055b85e46072bbe3bfb9f72bcbe14",
-    "rexruntime.dll": "51510296871429043af14e0b70489603c7a8bed6c76e1f519aba55464b4f857b",
+    # v2.22 (SDK 09a18ee) "silent-miscompile guard": NORMPACKED64 (4:20:20:20)
+    # unpack fix (78af0a8) -- the 20-bit sign-extend was `int32_t(u64<<44)>>44`,
+    # UB (shift >= width) AND the cast dropped the field: x/y/z decoded to 0.0
+    # unconditionally. Latent-only cure: NO port emits NORMPACKED64 (grep=0),
+    # gate byte-identical by construction. Plus tools/codegen_ub_lint.py
+    # (09a18ee): a decidable shift-past-width lint over the emitted templates
+    # that keeps this whole bug class out forever (green on current builders;
+    # regression-tested against the pre-fix pattern). The other 4 conclave
+    # "bugs" (32-bit carry, CR0, vcmpbfp NaN, denormal flush) were ground-truth
+    # re-verified as DELIBERATE, game-validated choices -- left untouched.
+    "rexglue.exe":    "0d69c737a0ff02f9e82007afe8cc801e45bdc2d652efea55d407668d4dc78c62",
+    "rexruntime.dll": "232fad8b75d8d43b59b2171be386499d308fb9f1d0717345bb4bcf689725883d",
 }
 
 

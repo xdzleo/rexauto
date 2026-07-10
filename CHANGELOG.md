@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.22.0 — "silent-miscompile guard" (2026-07-10)
+
+The ">100%" axis: hunting codegen that is WRONG but never crashes (run-heal
+is structurally blind to it). A 15-agent audit of every risk builder vs the
+PPC/Xenon/IEEE specs produced 5 candidate bugs; ground-truthing each against
+the live source proved 4 are deliberate, game-validated choices (32-bit
+carry/CR0 = the 360 ABI's dominant case; vcmpbfp NaN = matches Xenia's
+lowering; denormal flush = the documented Skate 3 audio fix) and exactly one
+real: **NORMPACKED64 (4:20:20:20) unpack decoded x=y=z to 0.0 always** — the
+20-bit sign-extend `int32_t(u64<<44)>>44` was undefined behavior (shift >=
+width) and the cast dropped the field (SDK 78af0a8). No shipping port emits
+NORMPACKED64, so the fleet gate is byte-identical 30/30 by construction: a
+latent cure, zero risk.
+
+**The class is now guarded forever:** `tools/codegen_ub_lint.py` (SDK
+09a18ee) statically flags any `intN_t(...) >> K` / `.uNN >> K` with K >=
+width inside the emitted templates — green on the current builders,
+regression-tested against the pre-fix pattern, exit 1 so it can gate commits.
+It also surfaces (non-failing) same-helper flag inconsistencies like the
+known FLOAT16_2/FLOAT16_4 RTZ/RTE split, so a NEW divergence gets a human
+look.
+
+**rexauto: companion-module deep-extract fixed (was a silent no-op).** For a
+multi-XEX companion, stage_jumptables runs before the module's sources exist
+and wrote an EMPTY functions-list; stage_deepextract then fed that empty
+known-set to IDA, every already-emitted function came back as a "candidate"
+(fifadllzf: 92188) and the pure-add gate rightly rejected the lot —
+accepted=0 on every companion, and real cures (FIFA Street's 0x827838A0
+FATAL) were discarded with the noise. The known-list is now refreshed from
+the generated sources whenever it is missing/empty; healthy entrypoints are
+untouched.
+
+SDK_PIN -> 09a18ee binaries. Gate: 30/30 byte-identical (budokai3's flagged
+diff was a stale baseline — two deep-extract cures folded after its last
+bless, proven identical under the v2.21 and v2.22 rexglue alike — re-blessed).
+
 ## 2.14.0 — "truthful diagnostics" (2026-07-03)
 
 A Gears of War 3 report ("recompilação falhou") unraveled a three-bug chain
