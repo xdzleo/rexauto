@@ -99,15 +99,24 @@ def _write_candidates(functions_toml, addrs):
     open(functions_toml, "w", encoding="utf-8", newline="\n").write(txt)
 
 
-def pure_add_gate(rexglue, port, name, manifest, gen, functions_toml, candidates, codegen_fn, log=print):
+def pure_add_gate(rexglue, port, name, manifest, gen, functions_toml, candidates, codegen_fn, log=print,
+                  baseline_current=False):
     """Return the subset of `candidates` that are provably pure additions. `codegen_fn()`
     must run a raw rexglue codegen over the current functions.toml (no heal). Backs up and
-    RESTORES functions.toml (the caller applies the accepted set)."""
+    RESTORES functions.toml (the caller applies the accepted set).
+
+    baseline_current=True: the caller GUARANTEES generated/ already reflects the current
+    functions.toml (e.g. _codegen_module runs do_codegen as the immediately preceding
+    step), so the opening baseline codegen is skipped -- on a giant companion module that
+    probe alone costs ~284s (fifadllzf, 101k funcs). A stale guarantee would corrupt the
+    base snapshot and mis-gate, so only pass True from a call site where the codegen is
+    literally the previous statement."""
     bak = functions_toml + ".deepx.bak"
     shutil.copyfile(functions_toml, bak)
     codegened = None   # the `accepted` set the current generated/ reflects (skip redundant passes)
     try:
-        codegen_fn()
+        if not baseline_current:
+            codegen_fn()
         base = func_bodies(gen, name)
         base_heads = sorted(base)
         accepted = set(candidates)

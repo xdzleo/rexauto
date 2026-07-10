@@ -1330,9 +1330,28 @@ def _codegen_module(ctx, m):
     # 4. Deep static extract -- now that the module's sources/init.h exist, the same
     #    funcmap + vtable data-xref pass the entrypoint gets folds in the functions
     #    the linear scan missed (before this reorder it silently skipped: no init.h).
-    stage_deepextract(mc)
-    # 5. Re-codegen to fold the deep-extract additions (no-op if it found nothing).
-    do_codegen(mc)
+    #    ONE-SHOT per module: it is a static analysis whose folds persist in the
+    #    module's functions.toml, but this function runs on EVERY stage_build
+    #    (setup_extra_modules), and re-running the extract+gate re-paid ~10-15min
+    #    of IDA + codegen probes on a giant module per build. Skip when the
+    #    module statefile already marks a completed (non-"skipped") run;
+    #    REXAUTO_MODULE_DEEPX=force re-runs it.
+    dx_prev = mc.load_state().get("deepextract")
+    dx_done = isinstance(dx_prev, dict) and "candidates" in dx_prev
+    if dx_done and os.environ.get("REXAUTO_MODULE_DEEPX") != "force":
+        mc.log("deep-extract already done (candidates=%s accepted=%s) -> skip "
+               "(REXAUTO_MODULE_DEEPX=force to re-run)"
+               % (dx_prev.get("candidates"), dx_prev.get("accepted")))
+    else:
+        # gen_current: do_codegen is the immediately preceding step, so the
+        # gate's opening baseline probe (~284s on fifadllzf) is redundant.
+        stage_deepextract(mc, gen_current=True)
+        # 5. Re-codegen to fold the additions -- ONLY when the gate accepted
+        #    something; an unconditional pass re-emitted the whole module
+        #    (~284s) to change nothing when accepted=0.
+        dx_now = mc.load_state().get("deepextract")
+        if isinstance(dx_now, dict) and dx_now.get("accepted"):
+            do_codegen(mc)
     if not os.path.exists(os.path.join(mc.gen, "sources.cmake")):
         raise SystemExit("[rexauto] extra module '%s' codegen failed after IDA "
                          "recovery -> see %s" % (m["key"], mc.statefile))
@@ -1412,7 +1431,7 @@ def setup_extra_modules(ctx):
     _inject_pch_into_cmake(ctx)
 
 
-def stage_deepextract(ctx):
+def stage_deepextract(ctx, gen_current=False):
     """Static function/vtable recovery: a deep IDA pass on the .i64 the jumptables stage
     produced harvests the function/vtable-target set the linear scan misses (~96% of what
     run-heal would otherwise find by launching the game N times), and the pure-addition
@@ -1471,7 +1490,7 @@ def stage_deepextract(ctx):
         ctx.env["rexglue"], ctx.port, ctx.name, ctx.manifest, ctx.gen, ctx.functions, cands,
         codegen_fn=lambda: rexglue(ctx, "--log-level", "error", "codegen", ctx.manifest,
                                    capture=True),
-        log=ctx.log)
+        log=ctx.log, baseline_current=gen_current)
     if accepted:
         _heal.register_functions(accepted, ctx.functions)  # additive {} superset-only
     ctx.log("deep-extract: +%d functions folded (pure additions); %d dropped, run-heal backstops the rest"
