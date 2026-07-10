@@ -2215,18 +2215,21 @@ SDK_PIN = {
     # owner-aware shrink, live injector updates. Gate 25/29 byte-identical;
     # the 4 diffs = the day's cured titles (FIFA title screen, sonic intro,
     # halo 3 walls down, forza ported), judged + re-blessed.
-    # v2.20 (SDK 8d2b8d6) "the runtime walls": VFS longest-match device
-    # resolution (NullDevice shadowed EVERY nested mount -- cache: never
-    # resolved in ANY title; WWE PAC staging validated), XCTD not-compressed
-    # (Bully 913-requery loop dead), GetNativeObject + 20 XMA NULL guards
-    # (Superman 67s->90s), GPU non-vertex fetch-constant bypass (Splosion
-    # draws decode), guest-stack guard-page grace + 512KiB floor
-    # (REX_MIN_STACK_KB), runtime-side autoplay (REX_AUTOPLAY: MnK driver
-    # synthesizes START/A, focus-independent), unresolved-branch heal via
-    # register_or_seed (crash_MoM 80ms -> 360s alive). Gate 25/29
-    # byte-identical; 4 diffs = heal-grown functions.toml, blessed.
-    "rexglue.exe":    "a0b7bc3afae96d726363fc33140e0b8a8ba74f0322e68173c5f74f0c56e66438",
-    "rexruntime.dll": "771dc1c007ec7c171e2302ffdfbc04b9da40a64963f970c83ab478424e21f92b",
+    # v2.21 (SDK 4b224a1) "static harvest + upstream harvest": the recompiler
+    # improves itself. CODEGEN: cross-function `b` (tail-call) targets now
+    # register as functions (was bl-only) -- kills the largest static-residue
+    # class (~39%, the Forza 0x830ED910 REX_FATAL class); a 20-port census
+    # proved 0 of the run-heal residue is truly irreducible. Fleet codegen
+    # changes uniformly (tail calls lower to registered functions) -> re-blessed;
+    # validated runtime on joust/gears/gta-sa/dbz (0 corruption). PLUS harvested
+    # from upstream nightly (8dadea6, each verified vs our fork by a dedicated
+    # agent -- 5 of 6 candidates rejected because ours was equal/better):
+    # PPCContext ungate (removes a fiber-path footgun; byte-identical), conditional-
+    # bcctr tail recovery, guest-stack-free-on-exit, spinlock self-deadlock fix,
+    # xex2_version MSB packing, + the achievement-tracking backend (XAM unlock
+    # reporting; overlay UI deferred). Runtime spot-check: skate3.
+    "rexglue.exe":    "b9658e8834d0dde028de71427c1a9c969d8055b85e46072bbe3bfb9f72bcbe14",
+    "rexruntime.dll": "51510296871429043af14e0b70489603c7a8bed6c76e1f519aba55464b4f857b",
 }
 
 
