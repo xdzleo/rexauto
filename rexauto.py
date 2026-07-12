@@ -2381,8 +2381,19 @@ SDK_PIN = {
     # from mounted install packages and reaches its loading screen. Gate
     # 30/30 byte-identical (fifa flag = same-day heal growth, proven under
     # old rexglue, re-blessed).
-    "rexglue.exe":    "e05bb6ed4c8ba4a76a5d39c1095688ea93cf2c95ed1babb07012147be2eacc22",
-    "rexruntime.dll": "b5c8e9ae0de3371d71ded06d0dfe11734db679fedc9af4ba364c35963709c143",
+    # v2.24 (SDK 80e886c) "GTA V reaches gameplay": RUNTIME-ONLY, the five
+    # RAGE boot walls between the install gate and the game: startup
+    # notifications delivered to EVERY XamNotify system listener (80e886c);
+    # XNetGetEthernetLinkStatus reports a live LAN link (a83b685);
+    # XexCheckExecutablePrivilege(11) -> INSECURE so cache routes to the
+    # direct path (16a4948); update: always mounted, empty when no TU --
+    # device-not-found was fatal to RAGE (e063379); writable gamecache:/
+    # commoncrc: engine scratch mounts (885018a). GTA V boots into GAMEPLAY
+    # (user-witnessed; intermittent freeze under investigation). Codegen
+    # untouched: gate 30/30 byte-identical (gta_v flag = same-day heal
+    # growth, re-blessed).
+    "rexglue.exe":    "71b45ddf35f622eec9caa93d2e3783509f62ff1700277d6184cac9310307ef23",
+    "rexruntime.dll": "e6a96b0291f5d832af88aef60218bf1b933676390303a952b43f248eea3e51fc",
 }
 
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.24.0 — "GTA V reaches gameplay" (2026-07-10)
+
+**The milestone: GTA V (545408A7, 2-disc) boots from "insert installation
+disc" all the way INTO GAMEPLAY.** v2.23 cured the install-content chain
+(enumerator, CD_ROM volume semantics, content mounts, XamSwapDisc completion
+event); this release adds the five RAGE boot walls that stood between the
+install gate and the game itself — every one a general runtime fix, verified
+against the engine's actual expectations:
+
+- **Startup notifications reach every system listener (SDK 80e886c).** RAGE
+  registers its own XamNotify listener and waits for the boot notification
+  set; delivering only to the first listener left the engine parked forever.
+- **XNetGetEthernetLinkStatus reports a live LAN link (a83b685).** The
+  network-init gate refused to complete on "no cable"; a dead link parked
+  boot before the render loop.
+- **XexCheckExecutablePrivilege(11) answers INSECURE (16a4948)** — routes the
+  engine's cache traffic to the direct path instead of the privileged one.
+- **update: is always mounted — empty when no TU (e063379).** RAGE treats
+  device-not-found on update: as fatal; an empty mount is the truthful state.
+- **Writable gamecache:/commoncrc: mounts (885018a)** — the engine's scratch
+  volumes for streamed/verified data.
+
+Known issue: gameplay freezes intermittently — under investigation (next
+release). The install-disc flow generalizes: any 2-disc title stages its
+install packages into the user content root and boots the play disc.
+
+SDK_PIN -> 80e886c binaries. Gate: fleet codegen re-verified.
+
 ## 2.23.0 — "sibling imports bound" (2026-07-10)
 
 **The Halo 3 "L360" wall, root-caused and fixed structurally (SDK 81ccf82).**
