@@ -2392,8 +2392,42 @@ SDK_PIN = {
     # (user-witnessed; intermittent freeze under investigation). Codegen
     # untouched: gate 30/30 byte-identical (gta_v flag = same-day heal
     # growth, re-blessed).
-    "rexglue.exe":    "71b45ddf35f622eec9caa93d2e3783509f62ff1700277d6184cac9310307ef23",
-    "rexruntime.dll": "e6a96b0291f5d832af88aef60218bf1b933676390303a952b43f248eea3e51fc",
+    # v2.25 (SDK 981cab8, branch rexglue-090-pickup) "both upstreams, merged":
+    # the fork was 82 commits behind mchughalex/rexglue-skate3 and had NOTHING
+    # from rexglue/rexglue-sdk 0.9.0-dev. Both pools harvested.
+    #   * FULL MERGE of skate3-sdk-clean@7eb0faf: native RHI (nrhi) D3D12+Vulkan
+    #     backends + the native-guest-output renderer hook -- INERT here (no
+    #     title registers a renderer, so TryRenderNativeGuestOutput returns
+    #     false and the emulated path is untouched); plus the generic fixes that
+    #     DO apply to every title: SDL audio credit-pacing starvation (robotic
+    #     audio), timer queue blocks instead of yield-spinning, forced-exit
+    #     watchdog + heap lock across close-time suspension, W^X guest pages,
+    #     host-pixel half-pixel offset under resolution scaling (we ship 2x2, so
+    #     this is live), GetExecutablePath via GetModuleFileNameW, NVIDIA
+    #     prefer-max-performance profile, discrete-GPU preference, atomic cvar
+    #     saves. Their imgui pin is a PRIVATE unpublished fork
+    #     (ImFontConfig::RasterizerGamma) -- detected through a generic lambda
+    #     and skipped on stock imgui.
+    #   * 7 picks from rexglue 0.9.0-dev (no shared ancestry -- their public
+    #     history is squashed at "Release v0.8.0" -- so cherry-picked by
+    #     content): DLL code_base via ReXModule_GetImageInfo so indirect calls
+    #     into companion modules resolve (#371, verified live on Spider-Man's
+    #     gamelogic module); jump-table targets that are known functions stay
+    #     separate instead of being imported as parent blocks (#370) -- a case
+    #     that used to CALL its landing (`sub_X(ctx, base)`, fresh frame,
+    #     returns to the dispatcher) now does `goto loc_X`, the correct lowering
+    #     of a computed goto; XMA loop wrap/loop-end frame; ffmpeg buffer flush
+    #     on context release; XPresenceInitialize; message-box byte-swap;
+    #     per-device FILE_SHARE_DELETE.
+    # Codegen CHANGED in 18 titles and it is an improvement, not a regression:
+    # fleet-wide only 3 addresses left a function table (budokai3 x2,
+    # crash_mind_over_mutant x1) and ALL 3 became in-function labels; 0 orphans,
+    # 0 dangling labels across 2456 generated files; the rest is dead-block
+    # removal. Re-blessed, gate then 30/30. Runtime: gears_of_war_3,
+    # gta_san_andreas, budokai3, spider_man_shattered_dimensions all boot, live
+    # 30s, 0 FATAL.
+    "rexglue.exe":    "761d531f1acd7d75a4aa8370e5737044bbad42e37045fa1575f9bb4b858cab7a",
+    "rexruntime.dll": "a29ffaa44b5e667b205b85e2aab8820d596f83245a4b8ef13b0af1b7e4826229",
 }
 
 

@@ -1,5 +1,84 @@
 # Changelog
 
+## 2.25.0 — "both upstreams, merged" (2026-07-27)
+
+**The fork stops drifting.** rexglue has two living upstreams and we had fallen
+behind both: 82 commits behind `mchughalex/rexglue-skate3` (the Skate 3 fork our
+SDK descends from) and nothing at all from `rexglue/rexglue-sdk` 0.9.0-dev. This
+release harvests both.
+
+### What Skate 3 recomp v2.0 actually had for us
+
+Their headline — "the whole game renders natively, 2x the frame rate at a
+quarter of the GPU power" — is a renderer **hand-written for Skate 3**: it hooks
+the game's own functions (`Sk8::PresentationEntity::BindConstants`), reads the
+scene out of guest memory at reverse-engineered struct offsets, and redraws it
+with bespoke HLSL. ~1.2 MB of title-specific C++. That does not generalize and
+we did not take it.
+
+What we took is everything underneath it, by **full merge** of
+`skate3-sdk-clean@7eb0faf`:
+
+- **Native RHI (nrhi)** — a title-agnostic D3D12 + Vulkan abstraction and the
+  native-guest-output renderer hook. **Inert here**: no title registers a
+  renderer, so `TryRenderNativeGuestOutput` returns false and the emulated path
+  runs exactly as before (verified: no `native`/`nrhi` activity in any launch
+  log). It is the door, not the room.
+- **Fixes that apply to every title today** — SDL audio credit-pacing
+  starvation on large device quanta (the robotic/slowed audio); the timer queue
+  blocks instead of yield-spinning; forced-exit watchdog on window close plus
+  the process heap lock held across close-time thread suspension (a real
+  teardown deadlock: UI thread in `RtlpFreeHeap`, suspended guest thread in
+  `RtlpAllocateHeap`); W^X for guest pages; the D3D9 half-pixel offset applied
+  in **host** pixels under resolution scaling, which kills resolve-boundary
+  seams — we ship 2x2 scaling, so this is live; `GetExecutablePath` via
+  `GetModuleFileNameW` instead of `_get_wpgmptr`; NVIDIA
+  prefer-max-performance application profile so a load-screen lull cannot park
+  the GPU in a low P-state; discrete-GPU preference and a device picker; atomic
+  cvar saves with malformed-config recovery.
+- Their imgui pin turned out to be a **private, unpublished fork** (it adds
+  `ImFontConfig::RasterizerGamma`, which exists in no ocornut branch). The font
+  gamma tweak is now compiled in only when the member exists, so the tree builds
+  against stock imgui.
+
+### What rexglue 0.9.0-dev had for us
+
+No shared git ancestry — their public history is squashed at "Release v0.8.0",
+so `git merge-base` is empty and adoption is by content. Seven picks:
+
+- **DLL `code_base` via `ReXModule_GetImageInfo` (#371)** — companion modules
+  now hand the runtime their real image/code layout, so indirect calls into them
+  resolve correctly. Verified live: Spider-Man's `gamelogic` module initializes
+  its function table at `code=880D0000-886B2F60` with no layout error.
+- **Jump-table targets that are known functions stay separate (#370)** — a case
+  that used to *call* its landing (`sub_X(ctx, base)`: fresh frame, returns to
+  the dispatcher instead of continuing the flow) now does `goto loc_X`, the
+  correct lowering of a computed goto. Same bug class as `forced_landings` and
+  switch-on-CTR, and the kind of miscompile that never crashes, so run-heal
+  never sees it.
+- XMA loop wrap emitting garbage and dropping the loop-end frame; ffmpeg buffer
+  flush on context release; `XPresenceInitialize`; message-box title/body
+  byte-swap; opt-in per-device `FILE_SHARE_DELETE`.
+
+Five upstream commits were **rejected with cause**, not skipped: their inline
+XMA decode (we already decode inline, with FPSCR save/restore — theirs would
+double-decode), their SIMD `vaddsws` (our scalar version also sets `vscr_sat`,
+theirs does not), a `vpkd3d128` revert with no stated rationale, and
+"always overwrite generated output" (it kills the hash-skip that keeps heal
+rounds incremental). The cooperative `TerminateTitle` drain is deferred — it is
+better design than ours, but it rewrites teardown and deserves its own runtime
+round.
+
+### Proof
+
+Codegen changed in 18 titles, and the change is an improvement: fleet-wide only
+**3 addresses** left a function table (budokai3 x2, crash_mind_over_mutant x1)
+and **all 3 became in-function labels** — 0 orphans, 0 dangling labels across
+2456 generated files, the rest dead-block removal. Baselines re-blessed, gate
+then **30/30 byte-identical**. Runtime: `gears_of_war_3`, `gta_san_andreas`,
+`budokai3` and `spider_man_shattered_dimensions` all boot, live 30s, 0 FATAL.
+The other 26 titles carry codegen proof only.
+
 ## 2.24.0 — "GTA V reaches gameplay" (2026-07-10)
 
 **The milestone: GTA V (545408A7, 2-disc) boots from "insert installation
