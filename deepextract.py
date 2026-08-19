@@ -17,6 +17,7 @@ stub that turns a real "invalid function" abort into a silent return).
 import os
 import re
 import glob
+import struct
 import json
 import shutil
 import bisect
@@ -109,6 +110,74 @@ def _write_candidates(functions_toml, addrs):
         txt = txt.rstrip() + "\n[functions]\n" + add
     open(functions_toml, "w", encoding="utf-8", newline="\n").write(txt)
 
+
+
+
+_LOC_RE = re.compile(r"^\s*loc_([0-9A-Fa-f]{8}):", re.M)
+_BCTR, _BLR = 0x4E800420, 0x4E800020
+
+
+def emitted_landing_pads(gen, name):
+    """Every address the recompiled code can actually be entered at: emitted function
+    definitions plus emitted in-function labels. functions.toml is what was ASKED FOR;
+    this is what the compiler will accept a branch into."""
+    pads = set()
+    for f in glob.glob(os.path.join(gen, "*.cpp")):
+        txt = open(f, encoding="utf-8", errors="replace").read()
+        for m in _DEF.finditer(txt):
+            pads.add(int(m.group(1), 16))
+        for m in _LOC_RE.finditer(txt):
+            pads.add(int(m.group(1), 16))
+    return pads
+
+
+def bctr_fallthrough_candidates(gen, name, image_path, image_base, code_base, code_size):
+    """Code that follows an unconditional `bctr` and that NOTHING emits.
+
+    The recompiler ends a function at `bctr`. Where real code follows one -- the next
+    thunk in a run of virtual-dispatch stubs, a cold tail -- it is emitted by nobody:
+    not a function, not even a loc_ label. It is simply absent, and the runtime FATALs
+    the moment the guest dispatches into it.
+
+    Found the hard way: Forza Horizon died at 0x8257D340, which is exactly such an
+    address -- the 4-instruction thunk before it (lwz/lwz/mtctr/bctr) is emitted whole
+    and stops at the bctr, and the next 24 bytes are real code that no TU contains.
+    Curing this class is what took that title from a guaranteed FATAL to reaching
+    gameplay; the runtime fix alone does not, verified by control run.
+
+    Deliberately conservative, because a false positive here is a function registered
+    over data: the address must be uncovered, decode to a valid primary opcode, and
+    reach a bctr/blr within 12 instructions -- i.e. look like a routine, not like a
+    constant pool. Everything it returns is still a CANDIDATE: the pure-add gate has
+    the final word, and it rejects a lot (43% on Forza -- 49 of 115 -- and applying
+    them ungated broke the title outright).
+    """
+    if not os.path.exists(image_path):
+        return []
+    img = open(image_path, "rb").read()
+    covered = emitted_landing_pads(gen, name)
+    end = code_base + code_size
+
+    def word(a):
+        o = a - image_base
+        return struct.unpack_from(">I", img, o)[0] if 0 <= o + 4 <= len(img) else None
+
+    out, a = [], code_base
+    while a < end - 8:
+        if word(a) == _BCTR:
+            t = a + 4
+            if t < end and t not in covered:
+                x = word(t)
+                if x and (x >> 26) != 0:
+                    for k in range(1, 13):
+                        v = word(t + 4 * k)
+                        if v in (_BCTR, _BLR):
+                            out.append(t)
+                            break
+                        if v is None or (v >> 26) == 0:
+                            break
+        a += 4
+    return out
 
 
 def split_by_grid(cands, gen, name):

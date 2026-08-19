@@ -1945,8 +1945,18 @@ def stage_deepextract(ctx, gen_current=False):
     if not os.path.exists(outjson):
         ctx.log("deep-extract: IDA produced nothing -> skip")
         return ctx.mark("deepextract", {"skipped": "extract-empty"})
-    cands = sorted(set(int(x["addr"], 16) for x in json.load(open(outjson)).get("emitted", []))
-                   - set(_heal.load_overrides_full(ctx.functions)))
+    cands = set(int(x["addr"], 16) for x in json.load(open(outjson)).get("emitted", []))
+    # Code that follows an unconditional bctr and that nothing emits. IDA's deep pass does
+    # not surface it -- there is no reference TO it; it is simply the next routine in a run
+    # of dispatch thunks, orphaned when the recompiler ended the previous one at its bctr.
+    # It needs the raw image, not the database, so it is scanned here rather than in IDA.
+    fall = _dx.bctr_fallthrough_candidates(
+        ctx.gen, ctx.name, os.path.join(ctx.work, "%s_image.bin" % ctx.name), ib, cb, cs)
+    if fall:
+        ctx.log("bctr-fallthrough scan: %d address(es) of unemitted code after an "
+                "unconditional bctr" % len(fall))
+        cands |= set(fall)
+    cands = sorted(cands - set(_heal.load_overrides_full(ctx.functions)))
     if not cands:
         return ctx.mark("deepextract", {"candidates": 0, "accepted": 0})
     # Route by the recompiler's own emitted grid BEFORE gating: an interior address can
