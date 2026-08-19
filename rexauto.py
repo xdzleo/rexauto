@@ -126,6 +126,32 @@ class Ctx:
         # behaviour change). codegen+runtime auto-apply it in memory; gabarito_key
         # folds it in so a TU build keeps its own cure set.
         self.tu_xexp = ex.get("tu_xexp")
+        # --- timing instrument (rationale in the block below this class) ------
+        # The frame stack is allocated ONCE, here, because _module_view hands a
+        # companion module a copy.copy(ctx): a per-object stack would give the
+        # module its own empty one, its frames would never be subtracted from the
+        # enclosing stage's child_s, and `build` would silently re-absorb the
+        # companion IDA minutes this instrument exists to split out.
+        self._t_stack = []
+        self._t_sink = os.path.join(self.work, ".rexauto_timings.jsonl")
+        self._t_run = {
+            # pid alone is not a unique run id (Windows recycles them, and a
+            # resumed pipeline can start in the same second as the one it
+            # resumes); the random tail makes "which run measured this stage"
+            # answerable without ambiguity, which is the whole point of stamping
+            # the run id next to every number.
+            "run": "%sZ-%d-%s" % (time.strftime("%Y%m%dT%H%M%S", time.gmtime()),
+                                  os.getpid(), os.urandom(2).hex()),
+            "started_utc": _utcnow(), "t0": time.perf_counter(), "seq": 0, "done": 0,
+            "header": False, "skipped": [], "host": _host_facts(), "argv": sys.argv[1:],
+            # Cold vs warm is not a judgement call: the two things that actually
+            # decide it are whether the IDA cache was disabled for this run and
+            # whether the port already had a checkpoint to resume from. A stage
+            # duration without those two cannot be compared against another run's,
+            # and an incomparable number is what produces a wrong A/B verdict.
+            "no_ida_cache": bool(os.environ.get("REXAUTO_NO_IDA_CACHE")),
+            "resumed": os.path.exists(self.statefile),
+        }
 
     def log(self, msg):
         print("[rexauto] %s" % msg, flush=True)
@@ -144,13 +170,350 @@ class Ctx:
         # width of the write, and load_state swallows a parse failure into {} -- so a
         # crash, a kill, or a full disk mid-mark silently costs the port every finished
         # stage, and the next run re-extracts, re-analyses and rebuilds from scratch
-        # with no error to explain why. os.replace is atomic on NTFS.
+        # with no error to explain why. The timings member fattened the file, widening
+        # exactly that window. os.replace is atomic on NTFS.
         tmp = self.statefile + ".tmp"
         with open(tmp, "w") as f:
             json.dump(st, f, indent=1)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.statefile)
+
+    # --- timing instrument -------------------------------------------------
+    def timer(self, stage, phase=None, module=None):
+        """Open a timed frame around a stage. Used at CALL SITES, never inside the
+        stage functions themselves: stage_build is entered both from main()'s loop
+        and from inside stage_runheal's companion auto-detect, and stage_jumptables
+        / stage_deepextract are entered both for the entrypoint and for every
+        companion module. A frame opened inside the function could not tell those
+        entries apart, and the two `build` numbers would be reported as one."""
+        return _TimingFrame(self, stage, phase, module)
+
+    def t_op(self, kind, bucket=None, **fields):
+        """Time one costly sub-operation: a codegen pass, a build attempt, an IDA
+        invocation, a game launch, the .i64 copy. Charges <bucket>_s / <bucket>_n
+        onto the innermost open frame AND writes its own sidecar row -- the bucket
+        answers "where did this stage's seconds go", the row answers "WHICH attempt
+        was the slow one", and in a 12-attempt build ladder or a 20-round heal loop
+        those are not the same question."""
+        return _TimingOp(self, kind, bucket, fields)
+
+    def t_note(self, **kw):
+        """Attach cold/warm context to the innermost open frame (IDA cache hit,
+        checkpoint reuse, receipt hit, CMakeCache present). A stage duration with
+        no such context is unusable for an A/B: comparing a cache-hit run against
+        a cache-miss run and calling the difference a win is the exact mistake the
+        measurement protocol forbids."""
+        try:
+            if self._t_stack:
+                self._t_stack[-1]["cold"].update(kw)
+        except Exception:
+            pass
+
+    def timing_skip(self, stage, status="skip-done", **fields):
+        """Record a stage this run did NOT run. Deliberately writes no wall_s: a
+        0.0 here would read as "this stage is free", and a fabricated zero is the
+        same class of guessed answer the recompiler refuses to emit."""
+        if not _timings_enabled():
+            return
+        try:
+            depth = len(self._t_stack)
+            if depth == 0:
+                # Only main()'s own loop feeds the run summary. A companion
+                # module's one-shot skip is a nested event: counting it as a
+                # pipeline stage would make a run that died halfway report itself
+                # "complete" on FIFA Street and never on joust.
+                self._t_run["skipped"].append(stage)
+                self._t_run["done"] += 1
+            rec = dict(fields)
+            rec.update({"stage": stage, "status": status, "depth": depth})
+            self._timings_emit("skip", rec)
+        except Exception:
+            pass
+
+    def timing_run_end(self, selected=None):
+        """Close out the run with ONE state write carrying the total wall clock and
+        the stages this run skipped. Called from a finally, so a stage that raises
+        still leaves a record -- marked "partial", because a total that silently
+        omits the stage that blew up is a lie about what the run cost."""
+        if not _timings_enabled():
+            return
+        try:
+            total = time.perf_counter() - self._t_run["t0"]
+            n = len(selected) if selected is not None else None
+            self._timings_state({
+                "last": {"run": self._t_run["run"], "at": self._t_run["started_utc"],
+                         "total_s": round(total, 3),
+                         "status": "complete" if (n is not None and self._t_run["done"] >= n)
+                                   else "partial",
+                         "stages_selected": list(selected) if selected is not None else None,
+                         "skipped": list(self._t_run["skipped"]),
+                         "cold": {"no_ida_cache": self._t_run["no_ida_cache"],
+                                  "resumed_checkpoint": self._t_run["resumed"]}}})
+        except Exception:
+            pass
+
+    def _timings_emit(self, kind, rec):
+        """One JSON object per line, opened 'a' and closed per record. Append-only
+        is the point: an append cannot endanger bytes already written, so a GUI stop
+        or a Ctrl-C mid-stage costs at most the row in flight -- unlike the state
+        file, which is truncated before it is rewritten."""
+        try:
+            r = self._t_run
+            if not r["header"]:
+                r["header"] = True
+                hdr = {"kind": "run", "run": r["run"], "seq": 0, "name": self.name,
+                       "started_utc": r["started_utc"], "host": r["host"], "argv": r["argv"],
+                       "work": self.work, "schema": TIMINGS_SCHEMA,
+                       "cold": {"no_ida_cache": r["no_ida_cache"],
+                                "resumed_checkpoint": r["resumed"]}}
+                with open(self._t_sink, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(hdr) + "\n")
+            r["seq"] += 1
+            row = dict(rec)
+            row.update({"kind": kind, "run": r["run"], "seq": r["seq"], "name": self.name})
+            with open(self._t_sink, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+        except Exception:
+            pass
+
+    def _timings_rollup(self, rec):
+        """Publish one closed OUTERMOST frame into .rexauto_state["timings"].
+
+        Only the outermost frame for a stage lands here. stage_build is re-entered
+        from inside stage_runheal (companion auto-detect), and publishing that
+        runheal-internal relink under the key "build" would be a number that
+        contradicts its own name -- the nested frames stay in the sidecar, where
+        `phase` and `depth` keep them distinguishable.
+
+        A stage timed by an EARLIER run is never overwritten by a later run that
+        skipped it: each entry carries the run id that measured it, so a resumed
+        pipeline shows last week's real seconds tagged with last week's run rather
+        than this run's zero."""
+        try:
+            self._timings_state({"stages": {rec["stage"]: {
+                "status": rec["status"], "wall_s": rec["wall_s"], "self_s": rec["self_s"],
+                "child_s": rec["child_s"], "sub": rec["sub"] or None, "cold": rec["cold"] or None,
+                "run": self._t_run["run"], "at": rec["t_start_utc"]}}})
+        except Exception:
+            pass
+
+    def _timings_state(self, patch):
+        """Merge a small patch into the single new top-level key "timings".
+
+        Collision-safe by construction: main()'s resume test is state.get(stage)
+        for stage in STAGES, "timings" is not a stage, and no code path anywhere
+        enumerates this file's keys -- build_parallel is the existing precedent for
+        a non-stage key living here.
+
+        Written tmp + os.replace rather than through mark(): mark() truncates the
+        file before it rewrites it and load_state() returns {} on ANY exception, so
+        a torn write silently converts a fully checkpointed port into a from-scratch
+        re-run. An instrument that adds writes to that file without adding that
+        guarantee would be buying measurement with checkpoint risk. os.replace only
+        ever swaps in a fully-written temp file, so the worst case here is a lost
+        timing row, never a lost checkpoint."""
+        st = self.load_state()
+        t = st.get("timings")
+        if not isinstance(t, dict) or t.get("schema") != TIMINGS_SCHEMA:
+            t = {"schema": TIMINGS_SCHEMA, "stages": {}}
+        t["host"] = self._t_run["host"]
+        t["sink"] = os.path.basename(self._t_sink)
+        for k, v in patch.items():
+            if k == "stages":
+                t.setdefault("stages", {}).update(v)
+            else:
+                t[k] = v
+        st["timings"] = t
+        tmp = self.statefile + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(st, f, indent=1)
+            os.replace(tmp, self.statefile)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
+
+# --------------------------------------------------------------------- timings
+# Nothing in this pipeline ever recorded a duration. `time` appeared only as a
+# DEADLINE -- do_build's 0.3s progress throttle, run_once's launch window -- and
+# not one subtraction was ever stored, so "the IDA pass dominates" and "the heal
+# loop is the expensive part" were folklore: unfalsifiable, and by the loop
+# charter's own rule (optimizing an unmeasured stage is forbidden) they blocked
+# every speed change behind them. This is that instrument. It only ADDS: one new
+# top-level state key, one new sidecar file, and stamps that are all no-ops under
+# REXAUTO_TIMINGS=0.
+#
+# WHY IT IS A STACK and not a wrapper around main()'s stage loop:
+#   stage_build -> setup_extra_modules -> _codegen_module runs a companion
+#   module's ENTIRE IDA pipeline (stage_jumptables + stage_deepextract + two
+#   codegens) inside the `build` stage, and stage_runheal re-enters the whole of
+#   stage_build on companion auto-detect. A flat timer bills fifadllzf's serial
+#   IDA minutes to "clang" and lets the re-entrant build's stamp land on top of
+#   the real one. Every frame therefore reports wall_s (inclusive) AND self_s
+#   (exclusive of its children), and carries phase/module/depth so two `build`
+#   rows are two rows instead of one overwriting the other.
+#
+# WHY A SKIPPED STAGE IS NOT 0.0s:
+#   a zero that means "we never ran it" is a fabricated measurement, and it would
+#   poison exactly the comparison the ledger exists for -- a warm re-run would
+#   look like a pipeline that got 8x faster. Checkpoint skips record status only,
+#   with no wall_s key at all.
+#
+# WHY EVERY STAMP IS SWALLOWED:
+#   the instrument may never be the reason a stage fails. Every sink write, every
+#   note and every roll-up is inside try/except, exactly as load_state() already
+#   swallows its own reader errors.
+TIMINGS_SCHEMA = 1
+
+
+def _timings_enabled():
+    """REXAUTO_TIMINGS=0 turns every stamp into a no-op, so the instrument's own
+    overhead is measurable by A/B instead of asserted (it is UNMEASURED until that
+    A/B is actually run)."""
+    return os.environ.get("REXAUTO_TIMINGS", "1").lower() not in ("0", "no", "off", "false")
+
+
+def _utcnow():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _host_facts():
+    """Read the box at runtime; never write a literal. A hardcoded core count or
+    RAM figure records a lie the first time this fleet is timed on a second
+    machine, and a timing ledger whose machine line is wrong is worse than no
+    ledger at all. Best-effort: an unreadable field is recorded as null, not
+    guessed."""
+    ram_gb = None
+    try:
+        import ctypes
+
+        class _MEMSTAT(ctypes.Structure):
+            # All NINE MEMORYSTATUSEX fields: the call validates dwLength against
+            # its own sizeof and returns ERROR_INVALID_PARAMETER for a struct that
+            # is one field short, which silently records ram_gb=null instead of
+            # the number -- exactly the kind of quiet nothing this instrument is
+            # supposed to stop producing.
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+        ms = _MEMSTAT()
+        ms.dwLength = ctypes.sizeof(_MEMSTAT)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            ram_gb = round(ms.ullTotalPhys / float(1 << 30), 1)
+    except Exception:
+        ram_gb = None
+    return {"cpus": os.cpu_count(), "ram_gb": ram_gb, "platform": sys.platform}
+
+
+class _TimingFrame:
+    """One timed span. Entering pushes onto the ctx-shared stack; leaving pops it,
+    subtracts its children to get self_s, adds its own wall to the parent's
+    child_s, appends a sidecar row and -- outermost frame only -- updates the
+    .rexauto_state roll-up. It never swallows the body's exception: a stage that
+    raised is the most interesting duration on the board (a doomed 174s build is a
+    real cost), so the frame records status and re-raises."""
+
+    def __init__(self, ctx, stage, phase=None, module=None):
+        self.ctx, self.stage, self.phase, self.module = ctx, stage, phase, module
+        self.rec = None
+        self.t0 = 0.0
+
+    def __enter__(self):
+        if not _timings_enabled():
+            return self
+        self.rec = {"stage": self.stage, "phase": self.phase, "module": self.module,
+                    "depth": len(self.ctx._t_stack), "t_start_utc": _utcnow(),
+                    "child_s": 0.0, "sub": {}, "cold": {}}
+        self.t0 = time.perf_counter()
+        self.ctx._t_stack.append(self.rec)
+        return self
+
+    def __exit__(self, et, ev, tb):
+        if self.rec is None:
+            return False
+        try:
+            wall = time.perf_counter() - self.t0
+            st = self.ctx._t_stack
+            # Pop by IDENTITY, and drop anything above us: if a nested frame ever
+            # leaked, an instrument that corrupts its own stack must not go on to
+            # corrupt the next stage's number too.
+            for i in range(len(st) - 1, -1, -1):
+                if st[i] is self.rec:
+                    del st[i:]
+                    break
+            # Subtract the UNROUNDED child total, then round -- rounding first
+            # made a frame whose children were essentially all of it report
+            # self_s = -0.0. Frames here are strictly nested and single-threaded,
+            # so children can never really exceed the parent; the clamp is
+            # correcting float noise, not hiding a number.
+            child_raw = self.rec["child_s"]
+            self.rec["wall_s"] = round(wall, 3)
+            self.rec["child_s"] = round(child_raw, 3)
+            self.rec["self_s"] = round(max(0.0, wall - child_raw), 3)
+            self.rec["status"] = ("ok" if et is None
+                                  else ("exit" if et is SystemExit else "raised"))
+            if st:
+                st[-1]["child_s"] += wall
+            self.ctx._timings_emit("frame", self.rec)
+            if self.rec["depth"] == 0:
+                self.ctx._t_run["done"] += 1
+                self.ctx._timings_rollup(self.rec)
+                self.ctx.log("timing %s: %.1fs wall (%.1fs self)"
+                             % (self.stage, self.rec["wall_s"], self.rec["self_s"]))
+        except Exception:
+            pass
+        return False
+
+
+class _TimingOp:
+    """A costly sub-operation inside a frame. Charges its seconds to the INNERMOST
+    open frame at the moment it runs, which is what keeps a companion module's IDA
+    invocation on the module's frame instead of on the build's."""
+
+    def __init__(self, ctx, kind, bucket, fields):
+        self.ctx, self.kind, self.bucket = ctx, kind, bucket
+        self.fields = fields
+        self.on = _timings_enabled()
+        self.t0 = 0.0
+
+    def set(self, **kw):
+        self.fields.update(kw)
+        return self
+
+    def __enter__(self):
+        if self.on:
+            self.t0 = time.perf_counter()
+        return self
+
+    def __exit__(self, et, ev, tb):
+        if not self.on:
+            return False
+        try:
+            wall = time.perf_counter() - self.t0
+            st = self.ctx._t_stack
+            if st and self.bucket:
+                sub = st[-1]["sub"]
+                sub["%s_s" % self.bucket] = round(sub.get("%s_s" % self.bucket, 0.0) + wall, 3)
+                sub["%s_n" % self.bucket] = sub.get("%s_n" % self.bucket, 0) + 1
+            rec = dict(self.fields)
+            rec.update({"op": self.kind, "bucket": self.bucket, "wall_s": round(wall, 3),
+                        "depth": len(st), "stage": st[-1]["stage"] if st else None,
+                        "module": st[-1]["module"] if st else None,
+                        "status": "ok" if et is None else "raised"})
+            self.ctx._timings_emit("op", rec)
+        except Exception:
+            pass
+        return False
 
 
 def run(cmd, **kw):
@@ -161,9 +524,16 @@ def rexglue(ctx, *xargs, env=None, capture=False):
     verify_sdk_pin(ctx.env)  # gate SDK use (codegen/init); a pure game run never reaches this
     cmd = [ctx.env["rexglue"]] + list(xargs)
     e = dict(os.environ, **(env or {}))
-    if capture:
-        return subprocess.run(cmd, env=e, cwd=ctx.port, capture_output=True, text=True)
-    return subprocess.run(cmd, env=e, cwd=ctx.port)
+    # Every rexglue invocation in the pipeline funnels through here -- including
+    # every pure-add-gate probe pass, because deepextract's codegen_fn is a lambda
+    # over this wrapper -- so one stamp here counts every codegen pass a run pays
+    # for, with no second call site to keep in sync.
+    with ctx.t_op("rexglue", "codegen", argv=[str(a) for a in xargs],
+                  dump_image=bool(env and "REX_DUMP_IMAGE" in env), capture=bool(capture)) as op:
+        r = (subprocess.run(cmd, env=e, cwd=ctx.port, capture_output=True, text=True) if capture
+             else subprocess.run(cmd, env=e, cwd=ctx.port))
+        op.set(rc=r.returncode)
+    return r
 
 
 def add_includes(ctx, names, manifest=None):
@@ -369,8 +739,10 @@ def stage_jumptables(ctx):
         # image + ranges from an identical codegen. Skip the redundant re-dump.
         ctx.log("reusing image + section ranges from the setjmp stage "
                 "(identical codegen; skipping the redundant image-dump pass)")
+        ctx.t_note(image_dump="reused-from-setjmp")
         base, image_end, exec_secs = reuse["base"], reuse["image_end"], reuse["exec_secs"]
     else:
+        ctx.t_note(image_dump="paid")
         ctx.log("dumping decompressed image + reading section ranges")
         try:
             blob = do_codegen(ctx, env={"REX_DUMP_IMAGE": image}, level="trace")
@@ -456,6 +828,7 @@ def stage_jumptables(ctx):
             add_includes(ctx, ["%s_switch_tables.toml" % ctx.name])
             ctx.log("jump tables from IDA cache: %d tables (identical image analyzed "
                     "before; delete rexauto/cache/ida to force re-analysis)" % n)
+            ctx.t_note(ida_cache="hit")
             return ctx.mark("jumptables", {"tables": n, "cache": True})
     idalog = out_json + ".idalog.txt"
     try:
@@ -464,10 +837,20 @@ def stage_jumptables(ctx):
     except OSError:
         pass
     ctx.log("recovering jump tables (IDA)")
+    ctx.t_note(ida_cache=("disabled" if os.environ.get("REXAUTO_NO_IDA_CACHE") else "miss"))
     stop = threading.Event()
     threading.Thread(target=_tail_idalog, args=(ctx, idalog, stop), daemon=True).start()
-    rr = run([ctx.env["python"], os.path.join(ctx.env["jt_repo"], "src", "recover.py"),
-              cfg, "--ida", ctx.env["idat"]])
+    # recover.py wall, NOT idat wall: this one process also builds the ELF and
+    # generates the toml. Naming it "ida_s" without saying so would attribute
+    # ELF-construction seconds to auto-analysis and send the next iteration
+    # optimizing the wrong thing. The finer split already exists inside the run --
+    # ida_jumptables.py prints cumulative [xjt] laps into <out>.idalog.txt, which
+    # _tail_idalog is already re-emitting here.
+    with ctx.t_op("ida", "ida", tool="recover.py",
+                  covers="idat + ELF build + toml gen", idalog=os.path.basename(idalog)) as op:
+        rr = run([ctx.env["python"], os.path.join(ctx.env["jt_repo"], "src", "recover.py"),
+                  cfg, "--ida", ctx.env["idat"]])
+        op.set(rc=rr.returncode)
     stop.set()
     if rr.returncode != 0 or not os.path.exists(ctx.switches):
         ctx.log("jump-table recovery failed -> continuing without it")
@@ -588,6 +971,11 @@ def _gen_restore_unchanged(ctx, snap):
     if units or headers:
         ctx.log("  incremental rebuild: reused %d unit(s)%s"
                 % (units, " + %d header(s)" % headers if headers else ""))
+    # The warm-build signal was already computed here and only ever logged. Return
+    # it so a build's seconds can be read next to "how many TUs ninja was allowed
+    # to skip" -- without that pairing a warm build and a cold one are the same
+    # number with two different meanings.
+    return units
 
 
 def _normalize_toml_newlines(ctx):
@@ -626,7 +1014,7 @@ def do_codegen(ctx, env=None, level="error"):
             # FOV / ultrawide-frustum render hooks) once codegen has converged and
             # before compile. No <name>_codegen_patches.toml -> no-op (byte-identical).
             _cgp.apply(ctx, log=ctx.log)
-            _gen_restore_unchanged(ctx, snap)
+            ctx.t_note(gen_units_reused=_gen_restore_unchanged(ctx, snap))
             # PCH wiring must run AFTER codegen: the only earlier call site
             # (setup_extra_modules) fires before <name>_init.h exists, so its
             # exists() guard silently skipped the injection and the v2.4.0
@@ -649,24 +1037,36 @@ def do_codegen(ctx, env=None, level="error"):
     raise SystemExit("[rexauto] codegen unresolved-call heal did not converge")
 
 
-def do_build(ctx, bat):
+def do_build(ctx, bat, attempt=None):
     """Stream the build so ninja's [N/M] progress reaches the UI live."""
     logp = os.path.join(ctx.work, "_build.log")
-    p = subprocess.Popen(["cmd", "/c", bat], stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, text=True, bufsize=1)
-    last = 0.0
-    with open(logp, "w") as lf:
-        for line in p.stdout:
-            lf.write(line)
-            m = re.search(r"\[(\d+)/(\d+)\]", line)
-            if m:
-                n, tot = int(m.group(1)), int(m.group(2))
-                now = time.time()
-                if now - last > 0.3 or n == tot:
-                    last = now
-                    name = line.strip().rsplit("/", 1)[-1].rsplit("\\", 1)[-1][:42]
-                    ctx.log("@build %d/%d %s" % (n, tot, name))
-    rc = p.wait()
+    # Two facts decide whether this build's seconds are comparable to another
+    # build's, and neither survives into .ninja_log: whether the build dir still
+    # had a CMakeCache (so the bat skipped the whole configure) and what -j the
+    # OOM handler had already knocked this port down to. Both are knowable here
+    # and nowhere afterwards, so they are captured before the clock starts.
+    op = ctx.t_op("build", "build", attempt=attempt,
+                  cmakecache=os.path.exists(os.path.join(ctx.builddir, "CMakeCache.txt")),
+                  parallel=ctx.load_state().get("build_parallel"))
+    with op:
+        p = subprocess.Popen(["cmd", "/c", bat], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+        last = 0.0
+        edges = None  # ninja's [N/M] total, if it printed one (a no-work build prints none)
+        with open(logp, "w") as lf:
+            for line in p.stdout:
+                lf.write(line)
+                m = re.search(r"\[(\d+)/(\d+)\]", line)
+                if m:
+                    n, tot = int(m.group(1)), int(m.group(2))
+                    edges = tot
+                    now = time.time()
+                    if now - last > 0.3 or n == tot:
+                        last = now
+                        name = line.strip().rsplit("/", 1)[-1].rsplit("\\", 1)[-1][:42]
+                        ctx.log("@build %d/%d %s" % (n, tot, name))
+        rc = p.wait()
+        op.set(rc=rc, edges=edges)
     if rc == 0:
         apply_game_icon(ctx)  # every relink rewrites the exe -> re-brand it
     return logp, rc
@@ -1359,8 +1759,12 @@ def _codegen_module(ctx, m):
             _heal.ensure_manifest_include(mc.manifest, os.path.basename(mc.forced))
         mc.log("jump tables already recovered (%s tables) -> skip re-analysis "
                "(REXAUTO_MODULE_JT=force to re-run)" % jt_prev.get("tables"))
+        mc.t_note(module_jumptables="skip-done")
+        mc.timing_skip("jumptables", "skip-done", module=mc.name)
     else:
-        stage_jumptables(mc)
+        mc.t_note(module_jumptables="ran")
+        with mc.timer("jumptables", phase="module", module=mc.name):
+            stage_jumptables(mc)
     # 3. First real codegen: the switch tables now resolve the computed branches, so
     #    this PASSES and emits generated/<key> (auto-register mops up tail calls).
     do_codegen(mc)
@@ -1379,10 +1783,14 @@ def _codegen_module(ctx, m):
         mc.log("deep-extract already done (candidates=%s accepted=%s) -> skip "
                "(REXAUTO_MODULE_DEEPX=force to re-run)"
                % (dx_prev.get("candidates"), dx_prev.get("accepted")))
+        mc.t_note(module_deepextract="skip-done")
+        mc.timing_skip("deepextract", "skip-done", module=mc.name)
     else:
         # gen_current: do_codegen is the immediately preceding step, so the
         # gate's opening baseline probe (~284s on fifadllzf) is redundant.
-        stage_deepextract(mc, gen_current=True)
+        mc.t_note(module_deepextract="ran")
+        with mc.timer("deepextract", phase="module", module=mc.name):
+            stage_deepextract(mc, gen_current=True)
         # 5. Re-codegen to fold the additions -- ONLY when the gate accepted
         #    something; an unconditional pass re-emitted the whole module
         #    (~284s) to change nothing when accepted=0.
@@ -1457,7 +1865,13 @@ def setup_extra_modules(ctx):
     for m in mods:
         _author_module_manifest(ctx, m)
         _seed_module_functions(ctx, m)
-        _codegen_module(ctx, m)
+        # Each companion gets its own frame nested inside the `build` stage that
+        # called it. Without the split, a companion's two idat launches, its .i64
+        # copy and up to nine full-module codegens are all reported as clang time
+        # on FIFA Street, Halo 3, Forza, Sonic and Spider-Man -- exactly the five
+        # titles where `build` is least likely to mean what it says.
+        with ctx.timer("module", module=m["key"], phase="build"):
+            _codegen_module(ctx, m)
     if mods:
         _relocate_colliding_tables(ctx, mods)
     # extra-module codegen rewrites generated/rexglue.cmake to point at the last extra;
@@ -1505,7 +1919,13 @@ def stage_deepextract(ctx, gen_current=False):
     cfg = os.path.join(ctx.work, "%s_deepx_cfg.json" % ctx.name)
     outjson = os.path.join(ctx.work, "%s_deepx.json" % ctx.name)
     outtoml = os.path.join(ctx.work, "%s_deepx.toml" % ctx.name)
-    shutil.copyfile(i64, workcopy)
+    # The working copy is its own cost line, not a rounding error: the .i64 is
+    # tens to hundreds of MB (299MB on grand_theft_auto_v), and a jumptables CACHE
+    # HIT still pays this copy in full -- so it belongs in the ledger next to the
+    # IDA seconds the cache did save.
+    with ctx.t_op("copy", "i64_copy", src=os.path.basename(i64),
+                  bytes=(os.path.getsize(i64) if os.path.exists(i64) else None)):
+        shutil.copyfile(i64, workcopy)
     p = lambda x: x.replace("\\", "/")
     json.dump({"image_base": ib, "text_start": cb, "text_end": cb + cs, "image_end": ib + isz,
                "known": p(funclist), "out_toml": p(outtoml), "out_json": p(outjson)},
@@ -1513,8 +1933,15 @@ def stage_deepextract(ctx, gen_current=False):
     ctx.log("deep IDA extraction (funcmap + vtable data-xref) on a .i64 copy")
     if os.path.exists(outjson):
         os.remove(outjson)
-    run([ctx.env["idat"], "-A", "-S%s %s" % (p(script), p(cfg)),
-         "-L" + p(os.path.join(ctx.work, "%s_deepx_ida.log" % ctx.name)), workcopy])
+    # Separated from the pure-add gate's codegen seconds on purpose: this stage
+    # pays BOTH an idat launch and (through the gate) up to eight full-title
+    # codegen passes, and until now the mark recorded only candidates/accepted
+    # with no cost attached to either half -- so "deepextract is expensive" could
+    # never be aimed at the half that actually is.
+    with ctx.t_op("ida", "ida", tool="idat", script="deep_extract.py") as op:
+        r_dx = run([ctx.env["idat"], "-A", "-S%s %s" % (p(script), p(cfg)),
+                    "-L" + p(os.path.join(ctx.work, "%s_deepx_ida.log" % ctx.name)), workcopy])
+        op.set(rc=r_dx.returncode)
     if not os.path.exists(outjson):
         ctx.log("deep-extract: IDA produced nothing -> skip")
         return ctx.mark("deepextract", {"skipped": "extract-empty"})
@@ -1522,7 +1949,28 @@ def stage_deepextract(ctx, gen_current=False):
                    - set(_heal.load_overrides_full(ctx.functions)))
     if not cands:
         return ctx.mark("deepextract", {"candidates": 0, "accepted": 0})
-    ctx.log("deep-extract: %d candidates -> pure-addition gate" % len(cands))
+    # Route by the recompiler's own emitted grid BEFORE gating: an interior address can
+    # never become a function head, so sending it to the pure-add gate guarantees a drop
+    # and throws away a real in-function landing. (budokai3: 115 of 116 were interior.)
+    cands, interior = _dx.split_by_grid(cands, ctx.gen, ctx.name)
+    n_land = 0
+    if interior:
+        ctx.log("deep-extract: %d of %d candidates are INTERIOR to an emitted function "
+                "-> in-function landings" % (len(interior), len(interior) + len(cands)))
+        n_land = _dx.landing_gate(
+            ctx.name, ctx.gen, ctx.forced, ctx.manifest,
+            lambda: rexglue(ctx, "--log-level", "error", "codegen", ctx.manifest, capture=True),
+            interior, log=ctx.log, switch_path=ctx.switches)
+    if not cands:
+        ctx.log("deep-extract: no gap candidates left for the pure-addition gate")
+        return ctx.mark("deepextract", {"candidates": len(interior), "accepted": 0,
+                                        "landings": n_land})
+    ctx.log("deep-extract: %d gap candidate(s) -> pure-addition gate" % len(cands))
+    # baseline_current decides whether the gate pays its opening baseline probe (a
+    # whole extra full-module codegen). It is the single biggest warm/cold switch
+    # inside this stage, so it is recorded next to the seconds rather than left to
+    # be inferred from the codegen pass count.
+    ctx.t_note(candidates=len(cands), gate_baseline_skipped=bool(gen_current))
     accepted = _dx.pure_add_gate(
         ctx.env["rexglue"], ctx.port, ctx.name, ctx.manifest, ctx.gen, ctx.functions, cands,
         codegen_fn=lambda: rexglue(ctx, "--log-level", "error", "codegen", ctx.manifest,
@@ -1530,9 +1978,11 @@ def stage_deepextract(ctx, gen_current=False):
         log=ctx.log, baseline_current=gen_current)
     if accepted:
         _heal.register_functions(accepted, ctx.functions)  # additive {} superset-only
-    ctx.log("deep-extract: +%d functions folded (pure additions); %d dropped, run-heal backstops the rest"
-            % (len(accepted), len(cands) - len(accepted)))
-    return ctx.mark("deepextract", {"candidates": len(cands), "accepted": len(accepted)})
+    ctx.log("deep-extract: +%d functions folded (pure additions), +%d landings; %d dropped, "
+            "run-heal backstops the rest"
+            % (len(accepted), n_land, len(cands) - len(accepted)))
+    return ctx.mark("deepextract", {"candidates": len(cands) + len(interior),
+                                    "accepted": len(accepted), "landings": n_land})
 
 
 def stage_build(ctx):
@@ -1553,7 +2003,7 @@ def stage_build(ctx):
             skip_codegen = False  # OOM retry: generated/ is already current
         else:
             do_codegen(ctx)
-        logp, rc = do_build(ctx, bat)
+        logp, rc = do_build(ctx, bat, attempt=attempt)
         txt = _heal._read_text(logp)
         if rc == 0 and os.path.exists(ctx.exe):
             write_game_root(ctx)
@@ -1684,6 +2134,13 @@ def run_once(ctx, seconds, discover=False):
     logdir = os.path.join(ctx.builddir, "logs")
     before = set(glob.glob(os.path.join(logdir, "*.log")))
     t0 = time.time()
+    # window_s is what the launch was ASKED to survive; wall_s is what it actually
+    # cost. They are not the same number and the state file only ever recorded the
+    # first: run_once breaks out the moment the process exits, so a 360s window
+    # spent on a title that dies at 12s has been billed at 360s in every estimate
+    # ever made of this stage.
+    op = ctx.t_op("launch", "launch", window_s=seconds, discover=bool(discover),
+                  autoplay=not bool(os.environ.get("REXAUTO_NO_AUTOPLAY")))
     env = dict(os.environ)
     if discover:
         env["REX_HEAL_DISCOVER"] = "1"
@@ -1694,36 +2151,40 @@ def run_once(ctx, seconds, discover=False):
     # processes can't steal foreground, and GetState zeroes input when unfocused.
     if not os.environ.get("REXAUTO_NO_AUTOPLAY"):
         env["REX_AUTOPLAY"] = "1"
-    try:
-        p = subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir, env=env,
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, close_fds=True,
-                             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
-                             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-    except OSError as ex:
-        ctx.log("  could not launch the game: %s" % ex)
-        return "", False
-    while time.time() - t0 < seconds:
-        if p.poll() is not None:
-            break
-        time.sleep(0.5)
-    alive = p.poll() is None
-    if alive:
-        p.terminate()
+    with op:
         try:
-            p.wait(timeout=5)
-        except Exception:
-            p.kill()
+            p = subprocess.Popen([ctx.exe, "--game_data_root=%s" % ctx.game], cwd=ctx.builddir,
+                                 env=env,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, close_fds=True,
+                                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0)
+                                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        except OSError as ex:
+            ctx.log("  could not launch the game: %s" % ex)
+            op.set(launched=False, alive=False, produced_log=False)
+            return "", False
+        while time.time() - t0 < seconds:
+            if p.poll() is not None:
+                break
+            time.sleep(0.5)
+        alive = p.poll() is None
+        if alive:
+            p.terminate()
             try:
                 p.wait(timeout=5)
             except Exception:
-                pass
-    new = [q for q in glob.glob(os.path.join(logdir, "*.log"))
-           if q not in before or os.path.getmtime(q) >= t0]
-    if not new:
-        ctx.log("  (this launch produced no log of its own)")
-        return "", alive
-    return _heal._read_text(max(new, key=os.path.getmtime)), alive
+                p.kill()
+                try:
+                    p.wait(timeout=5)
+                except Exception:
+                    pass
+        new = [q for q in glob.glob(os.path.join(logdir, "*.log"))
+               if q not in before or os.path.getmtime(q) >= t0]
+        op.set(launched=True, alive=alive, produced_log=bool(new))
+        if not new:
+            ctx.log("  (this launch produced no log of its own)")
+            return "", alive
+        return _heal._read_text(max(new, key=os.path.getmtime)), alive
 
 
 def _code_range(ctx):
@@ -1907,6 +2368,10 @@ def stage_runheal(ctx):
                 % (rcpt.get("verdict", "converged"), os.path.basename(rcpt_path)))
         if getattr(ctx.args, "publish_gabarito", False):
             publish_gabarito(ctx)  # cures are on disk; publishing needs no launch
+        # The receipt path is THE warm case of this stage: it is the difference
+        # between zero launches and two 360s ones. A runheal duration that does not
+        # say which of those it was is not a measurement of anything.
+        ctx.t_note(receipt="hit", launches=0)
         return ctx.mark("runheal", {"receipt": True, "verdict": rcpt.get("verdict")})
     # --- Tier 1: minimal launches decide ---------------------------------------
     # Discover mode (REX_HEAL_DISCOVER): the runtime logs+continues on each
@@ -1938,6 +2403,10 @@ def stage_runheal(ctx):
     except Exception:
         primed = False
     window = confirm_seconds
+    # Recorded before the first launch, because both facts change during the loop:
+    # `primed` decides whether the deciding run costs one extra launch, and the
+    # receipt miss is what this stage's whole cost hangs off.
+    ctx.t_note(receipt="miss", primed_at_entry=bool(primed), confirm_seconds=confirm_seconds)
     resynced = set()  # addresses we've already forced a clean relink for (anti-loop)
     shrunk = set()    # containing functions we've already end-shrunk (anti-loop)
     for it in range(1, ctx.args.heal_iters + 1):
@@ -2038,7 +2507,13 @@ def stage_runheal(ctx):
                 if newmods:
                     ctx.log("  %d companion XEX(s) auto-detected -> rebuilding with "
                             "them recompiled" % len(newmods))
-                    stage_build(ctx)
+                    # phase="runheal": this is stage_build re-entered from inside
+                    # the heal loop. It gets its own frame in the sidecar and is
+                    # deliberately kept OUT of the .rexauto_state roll-up, because
+                    # publishing a heal-round relink under the key "build" would be
+                    # a number that contradicts its own name.
+                    with ctx.timer("build", phase="runheal"):
+                        stage_build(ctx)
                     known = {mc.name for mc, _, _ in mod_heal}
                     for m in extra_modules(ctx):
                         mc = _module_view(ctx, m)
@@ -2233,214 +2708,20 @@ def stage_run(ctx):
 # and tested with. Override (advanced, may produce broken builds) by setting
 # REXAUTO_SKIP_SDK_CHECK=1. Bump these when the bundled SDK is updated.
 SDK_PIN = {
-    # v1.9: vtable mid-function landing discovery restored. phase_discover.cpp now
-    # addFunction()s a vtable slot that lands inside a parent (no registerChunk, so
-    # the parent's bctr lowering stays byte-identical -> Budokai3-safe), instead of
-    # dropping it. Restores clean-SDK coverage: indirect/virtual call targets (e.g.
-    # skate3 0x82B30790) are statically discovered instead of runtime-healed.
-    # Keeps v1.7's switch-on-ctr build_bctr + discovery-trap. Runtime also carries
-    # caller-lr in the invalid-call FATAL + GPU command-ring memory fixes (battle-freeze).
-    # SDK commits 8b84c2d (codegen) + 3b0d7cc (runtime); gate 9/9 byte-identical.
-    # Pin re-generated to the actually-shipped v1.9 binaries (rebuilt from the same
-    # HEAD 3b0d7cc; C++ links are non-reproducible so the exact bytes differ from the
-    # first v1.9 build) so the shipped rexauto.exe pin == the sha256 of rexglue/tool/*
-    # in the shipped rexglue-sdk-win64.zip. cmake --install refreshed the whole tree.
-    # v2.0 (SDK commit b363c08): three runtime fixes from the SVR07 (Yukes) crack —
-    # (1) FPSCR host-thread MXCSR mask leak -> no more spurious STATUS_FLOAT_INEXACT_RESULT
-    # on host-thread guest dispatch (fleet-wide); (2) writable cache: VFS mount; (3) xenia
-    # ranged-alloc offset. Codegen untouched -> gate 10/10 byte-identical + skate3 runtime PASS.
-    # v2.1 (Gears of War Judgment): CODEGEN-ONLY fix -- discoverBlocks now seeds the
-    # IDA-recovered config switch_tables targets as in-function blocks (function_scanner.cpp
-    # /.h + phase_discover.cpp), so a hand-written computed-goto routine the SDK's heuristic
-    # detectJumpTable under-recovers (Gears sub_830AFE28, a stateful decompressor loop) emits
-    # loc_ for ALL its landings and stays ONE function -- its shared-tail loop-back stays intra-
-    # function (splitting the landings would sever it -> runtime FATAL). Inert where discovery
-    # was already complete (visited/blockStarts guard) -> fleet codegen byte-identical. rexruntime
-    # UNCHANGED (0ce11411; the runtime links no codegen) -> zero runtime-behavior change fleet-wide.
-    # v2.9 (guest fibers): RUNTIME-ONLY -- XThread::Reenter + reenter_exception (same
-    # mechanism as mainline xenia): KeSetCurrentStackPointers on a fiber'd thread
-    # (X_KTHREAD::fiber_ptr set) unwinds the host stack to XThread::Execute and
-    # re-enters guest code at the new fiber's LR; the Execute loop resolves reentry
-    # addresses via ResolveIndirectFunction so mid-function resume sites flow into
-    # the standard heal machinery. Gated on fiber_ptr: titles that never fiber-switch
-    # (the whole pre-Korra fleet) never take the path -> runtime spot-check PASS.
-    # Required by the PlatinumGames digital titles (Korra 58411447 proved live:
-    # dead-at-boot -> engine up, 20 threads, input polling, rendering), Halo 3/
-    # Reach/4, Forza 2 (xenia label kernel-KeSetCurrentStackPointers, 15 titles).
-    # rexglue.exe UNCHANGED -> codegen byte-identical fleet-wide (gate all-blessed PASS).
-    # v2.11 (codegen perf): CODEGEN-ONLY -- GapFill's cleanupAbsorbedGapFills was
-    # O(gapfills x total-functions) (~1.8B probes at 42k funcs; quadratic on GTA V):
-    # replaced with a walk of the existing sorted-base index. Same predicate, same
-    # removal set => byte-identical (gate: blessed fleet PASS twice). 8.2s -> 31ms
-    # per codegen pass on GTA-SA; bigger absolute win on every larger title and on
-    # every repeated pass (setjmp/image-dump/pure-add gate/heal retries).
-    # rexruntime UNCHANGED (20aec5ac).
-    # v2.12 (runtime rebuild): the exploratory texture-dump-to-DDS path (a GPU
-    # debug feature, cvar-gated OFF by default) was removed from the runtime; no
-    # other runtime source changed (fiber HEAD afec3c0). The dll relinks to a new
-    # hash (C++ links are non-reproducible) so the pin is re-generated to the
-    # actually-shipped dump-free binary. Default-cvar behaviour is identical to
-    # 20aec5ac -> runtime spot-check PASS, codegen (rexglue.exe) UNCHANGED.
-    # v2.13 (runtime ADDITIVE): xboxkrnl_usbcam.cpp stubs enabled in the kernel
-    # (the CMakeLists "TODO: lol eventually" line) -- 'Splosion Man/Ms. 'Splosion
-    # Man import XUsbcam* (face-cam) and could not LINK without them; titles that
-    # never call the camera never touch the stubs (pure export addition, gate
-    # blessed-fleet codegen PASS + CA/Gears runtime alive). rexglue.exe UNCHANGED.
-    # v2.14 (codegen 1-line, fleet-wide INTENTIONAL diff): REX_CALL_INDIRECT_FUNC
-    # in the generated init.h now writes ctx.last_indirect_target UNCONDITIONALLY.
-    # Unregistered slots hold the InvalidFunctionTrap (non-null) so the likely
-    # path called the trap without the fallback ever running -> the trap reported
-    # a STALE target from an earlier resolved call. That ghost address made the
-    # run-heal chase already-registered functions forever (Gears of War 3:
-    # 0x8271C710 re-flagged every round while the real unresolved target was a
-    # different address). Diff = one macro line in every port's init.h; judged
-    # and re-blessed fleet-wide. rexruntime UNCHANGED.
-    # + runtime: InvalidFunctionTrap now logs GetFunction(target) before the
-    # fatal abort ("trap diagnostics"), bifurcating table-miss from call-path
-    # bugs at zero cost outside the abort path (how the ghost-target loop and
-    # the stale-exe chain were root-caused).
-    # v2.15 (codegen ADDITIVE): [[guest_patches]] manifest support -- community
-    # xenia-canary game-patch byte writes applied to the guest image right after
-    # the XEX loads in codegen, BEFORE analysis, so fixes are baked permanently
-    # into the recompiled native code (first user: Gears of War 3 "Disable
-    # Ambient Occlusion" = the greenish ghost-shadow under upscaling, applied as
-    # a surgical DepthOfField-gate-only subset that keeps AO alive). Empty/absent
-    # section -> byte-identical for every existing project.
-    # v2.16 (RUNTIME, additive/gated): two fixes that take 565507E4 Crash of the
-    # Titans from crash-at-boot to booting + running its renderer, both structured
-    # to not touch any working title:
-    #  (1) GREEN-THREAD HOST-FIBER BRIDGE (kernel commit 7db6198): titles that run
-    #      their own cooperative scheduler on raw KeSetCurrentStackPointers now
-    #      suspend/resume via real host fibers (rex::thread::Fiber) instead of the
-    #      lossy Reenter-unwind, so a green context that RETURNS up its own guest
-    #      chain (yield epilogue) no longer silently exits the thread. Gated
-    #      byte-identical on (fiber_ptr && guest_object()==thread) + same-stack
-    #      early-out -> no pre-fiber fleet title runs a new instruction.
-    #  (2) TITLE-LIVENESS (commit e580b29): the app no longer quits when the guest
-    #      entry thread returns; it waits for all guest-created threads to drain
-    #      (HasRunningGuestThreads), matching 360 semantics. Titles whose main
-    #      thread never returns are unaffected.
-    #  + gpu/shader (commit 29e70b4): stop double-reverting the normalized-coord
-    #      tfetch offset by draw_resolution_scale (it was already guest-size
-    #      normalized). Byte-identical at scale=1; only scaled-texture normalized
-    #      samples at scale>1 change.
-    # rexglue.exe relinks (C++ links non-reproducible) but codegen output is
-    # UNCHANGED from v2.15 -> pin re-generated to the actually-shipped binaries.
-    # v2.17 (SDK-source only, PIN UNCHANGED): in-game settings menu (F1) --
-    # ReXApp now wires the curated SimpleSettingsDialog (resolution scale
-    # 720p/1440p/2160p, framerate, fullscreen/vsync, + title-conditional FoV/
-    # ultrawide), with "Apply & Restart" self-relaunching the exe to apply
-    # resolution changes. The wiring lives in the shipped share/rexglue/
-    # rex_app.cpp, which every title compiles into its OWN exe -- so neither
-    # rexglue.exe nor rexruntime.dll changes (pin stays on the v2.16 binaries;
-    # the SimpleSettingsDialog code was already compiled into rexui/rexruntime).
-    # Existing ports get the menu on relink; new ports get it automatically.
-    # v2.18 (SDK commit af9e790): relocatable per-module function table
-    # (function_table_base) -- the multi-XEX collision cure. When a companion
-    # image loads right after the main's (FIFA Street: fifadllzf at 0x82300000),
-    # the main's dispatch table at image_base+image_size would overlap it and the
-    # companion's functions never register (FATAL 0x82612A48). New optional
-    # [entrypoint] manifest key relocates the table (rexauto authors it
-    # automatically on collision, _relocate_colliding_tables); runtime overlap
-    # check now tests image and table as separate ranges. Emitted ONLY when the
-    # key is present (exists()-gated templates; this inja treats "" as truthy so
-    # an always-present empty value is unsafe) -> fleet codegen byte-identical
-    # (gate 18/18 PASS identical; gears' 1 diff = the v2.17 SSAO guest_patch
-    # post-dating its baseline, re-blessed). Runtime spot-check: gears survived
-    # 360s on the new rexruntime; FIFA main table at 0x86B70000 "(explicit
-    # base)" + companion registers + companion code executes.
-    # v2.19 (SDK commit f5e5ce1) "the never-boots cohort": kernel/VFS answers
-    # (XCTD not-compressed, FILE_DEVICE_DISK, cache0:/cache1: mounts,
-    # delete-on-close honored) + sibling-module imports recompiled as guest
-    # code + rexauto: zero-touch companion autodetect, module setjmp/longjmp,
-    # owner-aware shrink, live injector updates. Gate 25/29 byte-identical;
-    # the 4 diffs = the day's cured titles (FIFA title screen, sonic intro,
-    # halo 3 walls down, forza ported), judged + re-blessed.
-    # v2.21 (SDK 4b224a1) "static harvest + upstream harvest": the recompiler
-    # improves itself. CODEGEN: cross-function `b` (tail-call) targets now
-    # register as functions (was bl-only) -- kills the largest static-residue
-    # class (~39%, the Forza 0x830ED910 REX_FATAL class); a 20-port census
-    # proved 0 of the run-heal residue is truly irreducible. Fleet codegen
-    # changes uniformly (tail calls lower to registered functions) -> re-blessed;
-    # validated runtime on joust/gears/gta-sa/dbz (0 corruption). PLUS harvested
-    # from upstream nightly (8dadea6, each verified vs our fork by a dedicated
-    # agent -- 5 of 6 candidates rejected because ours was equal/better):
-    # PPCContext ungate (removes a fiber-path footgun; byte-identical), conditional-
-    # bcctr tail recovery, guest-stack-free-on-exit, spinlock self-deadlock fix,
-    # xex2_version MSB packing, + the achievement-tracking backend (XAM unlock
-    # reporting; overlay UI deferred). Runtime spot-check: skate3.
-    # v2.22 (SDK 09a18ee) "silent-miscompile guard": NORMPACKED64 (4:20:20:20)
-    # unpack fix (78af0a8) -- the 20-bit sign-extend was `int32_t(u64<<44)>>44`,
-    # UB (shift >= width) AND the cast dropped the field: x/y/z decoded to 0.0
-    # unconditionally. Latent-only cure: NO port emits NORMPACKED64 (grep=0),
-    # gate byte-identical by construction. Plus tools/codegen_ub_lint.py
-    # (09a18ee): a decidable shift-past-width lint over the emitted templates
-    # that keeps this whole bug class out forever (green on current builders;
-    # regression-tested against the pre-fix pattern). The other 4 conclave
-    # "bugs" (32-bit carry, CR0, vcmpbfp NaN, denormal flush) were ground-truth
-    # re-verified as DELIBERATE, game-validated choices -- left untouched.
-    # v2.23 (SDK db6bd1d) "sibling imports bound + the install-disc flow":
-    # CODEGEN+RUNTIME 81ccf82 sibling-import binding (Halo 3 L360 root cause:
-    # raw placeholder thunks looped caller<->thunk to stack overflow; now
-    # patched to IAT-slot dispatch + runtime binds type-0 slots per module
-    # load). RUNTIME: XamContentCreateEnumeratorInternal implemented (GTA V's
-    # install discovery -- was a stub, enumeration succeeded empty ->
-    # "insert installation disc"); game volume answers FILE_DEVICE_CD_ROM
-    # (retail from-disc branch); content-mount device path had a trailing
-    # separator that broke "<pkg>:\file" resolution; XamSwapDisc signals its
-    # completion KEVENT (one-arg stub swallowed the handle -> eternal wait
-    # after the install gate passed). Chain verified by IDA decompile of GTA
-    # V's install state machine (sub_8299EE40) + live runs: game now streams
-    # from mounted install packages and reaches its loading screen. Gate
-    # 30/30 byte-identical (fifa flag = same-day heal growth, proven under
-    # old rexglue, re-blessed).
-    # v2.24 (SDK 80e886c) "GTA V reaches gameplay": RUNTIME-ONLY, the five
-    # RAGE boot walls between the install gate and the game: startup
-    # notifications delivered to EVERY XamNotify system listener (80e886c);
-    # XNetGetEthernetLinkStatus reports a live LAN link (a83b685);
-    # XexCheckExecutablePrivilege(11) -> INSECURE so cache routes to the
-    # direct path (16a4948); update: always mounted, empty when no TU --
-    # device-not-found was fatal to RAGE (e063379); writable gamecache:/
-    # commoncrc: engine scratch mounts (885018a). GTA V boots into GAMEPLAY
-    # (user-witnessed; intermittent freeze under investigation). Codegen
-    # untouched: gate 30/30 byte-identical (gta_v flag = same-day heal
-    # growth, re-blessed).
-    # v2.25 (SDK 981cab8, branch rexglue-090-pickup) "both upstreams, merged":
-    # the fork was 82 commits behind mchughalex/rexglue-skate3 and had NOTHING
-    # from rexglue/rexglue-sdk 0.9.0-dev. Both pools harvested.
-    #   * FULL MERGE of skate3-sdk-clean@7eb0faf: native RHI (nrhi) D3D12+Vulkan
-    #     backends + the native-guest-output renderer hook -- INERT here (no
-    #     title registers a renderer, so TryRenderNativeGuestOutput returns
-    #     false and the emulated path is untouched); plus the generic fixes that
-    #     DO apply to every title: SDL audio credit-pacing starvation (robotic
-    #     audio), timer queue blocks instead of yield-spinning, forced-exit
-    #     watchdog + heap lock across close-time suspension, W^X guest pages,
-    #     host-pixel half-pixel offset under resolution scaling (we ship 2x2, so
-    #     this is live), GetExecutablePath via GetModuleFileNameW, NVIDIA
-    #     prefer-max-performance profile, discrete-GPU preference, atomic cvar
-    #     saves. Their imgui pin is a PRIVATE unpublished fork
-    #     (ImFontConfig::RasterizerGamma) -- detected through a generic lambda
-    #     and skipped on stock imgui.
-    #   * 7 picks from rexglue 0.9.0-dev (no shared ancestry -- their public
-    #     history is squashed at "Release v0.8.0" -- so cherry-picked by
-    #     content): DLL code_base via ReXModule_GetImageInfo so indirect calls
-    #     into companion modules resolve (#371, verified live on Spider-Man's
-    #     gamelogic module); jump-table targets that are known functions stay
-    #     separate instead of being imported as parent blocks (#370) -- a case
-    #     that used to CALL its landing (`sub_X(ctx, base)`, fresh frame,
-    #     returns to the dispatcher) now does `goto loc_X`, the correct lowering
-    #     of a computed goto; XMA loop wrap/loop-end frame; ffmpeg buffer flush
-    #     on context release; XPresenceInitialize; message-box byte-swap;
-    #     per-device FILE_SHARE_DELETE.
-    # Codegen CHANGED in 18 titles and it is an improvement, not a regression:
-    # fleet-wide only 3 addresses left a function table (budokai3 x2,
-    # crash_mind_over_mutant x1) and ALL 3 became in-function labels; 0 orphans,
-    # 0 dangling labels across 2456 generated files; the rest is dead-block
-    # removal. Re-blessed, gate then 30/30. Runtime: gears_of_war_3,
-    # gta_san_andreas, budokai3, spider_man_shattered_dimensions all boot, live
-    # 30s, 0 FATAL.
-    "rexglue.exe":    "761d531f1acd7d75a4aa8370e5737044bbad42e37045fa1575f9bb4b858cab7a",
-    "rexruntime.dll": "a29ffaa44b5e667b205b85e2aab8820d596f83245a4b8ef13b0af1b7e4826229",
+    # v2.26: re-pinned to an SDK built FROM SOURCE, which the previous pin was not.
+    # The shipped 981cab8 binaries already carried the register_cpp.inja whitespace
+    # trim (a LATER commit), so building the named commit did not reproduce them and
+    # nobody could rebuild the pinned SDK. Three independent defects made a from-source
+    # build impossible or silently wrong: CMakeLists aborts on MSVC without naming
+    # Clang, the preset carries -march=x86-64-v3 that a raw cmake invocation misses
+    # (_mm_shuffle_epi8 fails to compile without it), and INJA_TEMPLATE_FILES was a
+    # hand-kept list that omitted register_cpp.inja, so editing a template did not
+    # re-trigger the embed step. All three fixed; the tree now builds and its codegen
+    # is byte-identical to the old pinned binary on 27 of 30 fleet titles (the other 3
+    # carry intentional, blessed changes). Source: 981cab8 + 6f95a19 + d33efdf +
+    # upstream 10cf1ad + f2b91f2 (both verified inert on this fleet).
+    "rexglue.exe": "58013dfed1c6d063efe9a8110847526bd8006088f71f2d88fffef0c3c645f92f",
+    "rexruntime.dll": "b9ecd954e62141525685c5bdf94642af0bb5e0315093fd3830c307053d9514ac",
 }
 
 
@@ -2608,12 +2889,23 @@ def main():
     start = order.index(args.from_stage) if args.from_stage else 0
     selected = [args.only] if args.only else order[start:]
 
-    for stage in selected:
-        if not args.only and not args.from_stage and state.get(stage):
-            ctx.log("skip %s (done)" % stage)
-            continue
-        ctx.log("=== stage: %s ===" % stage)
-        fns[stage](ctx)
+    # The two log lines below are a public interface -- the GUI's stage tracker
+    # string-matches "=== stage: " and "skip ... (done)" off this stdout (gui/
+    # server.py) -- so the timing instrument wraps them and never reformats them.
+    try:
+        for stage in selected:
+            if not args.only and not args.from_stage and state.get(stage):
+                ctx.log("skip %s (done)" % stage)
+                ctx.timing_skip(stage)  # recorded as skipped, NOT as 0 seconds
+                continue
+            ctx.log("=== stage: %s ===" % stage)
+            with ctx.timer(stage):
+                fns[stage](ctx)
+    finally:
+        # In a finally so a stage that raises still leaves a run record -- marked
+        # "partial", because a total that silently omits the stage that blew up is
+        # a lie about what the run cost.
+        ctx.timing_run_end(selected)
     ctx.log("done. project: %s" % ctx.port)
     if not want_run and os.path.exists(ctx.exe):
         ctx.log('to play:  "%s" --game_data_root="%s"' % (ctx.exe, ctx.game))
