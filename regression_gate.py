@@ -37,8 +37,24 @@ import subprocess
 import importlib.util
 import concurrent.futures
 
+
+
+def _first(paths):
+    for p in paths:
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-AUTOPORTS = r"C:\Skate3Recomp\autoports"
+# The fleet root FOLLOWS the pipeline; it does not guess. A hardcoded literal here
+# is what silently disarmed the law: the fleet moved to C:\Skate3\autoports, projects()
+# went to zero, and main() exited "no matching projects" -- a line that reads like a
+# mistyped filter, not like "nothing is being gated at all". Same env var rexauto.py
+# --work honours, so the two cannot drift again; the old root stays last so a machine
+# still laid out that way keeps working.
+AUTOPORTS = os.environ.get("REXAUTO_WORK") or _first(
+    [r"C:\Skate3\autoports", r"C:\Skate3Recomp\autoports"]) or r"C:\Skate3\autoports"
 BASELINES = os.path.join(HERE, "baselines")
 HEAVY = {"skate3"}                 # run last / alone-ish (huge image)
 MAX_PARALLEL = 4
@@ -68,12 +84,39 @@ except Exception:
 
 def find_rexglue():
     cands = [os.environ.get("REXGLUE"),
+             r"C:\Skate3\rexglue-sdk\out\install\win-amd64\bin\rexglue.exe",
              r"C:\Skate3Recomp\rexglue-sdk\out\install\win-amd64\bin\rexglue.exe"]
-    cands += sorted(glob.glob(r"C:\Skate3Recomp\rexglue-sdk\out\win-amd64\*\rexglue.exe"))
+    for root in (r"C:\Skate3\rexglue-sdk", r"C:\Skate3Recomp\rexglue-sdk"):
+        cands += sorted(glob.glob(os.path.join(root, r"out\win-amd64\*\rexglue.exe")))
     for c in cands:
         if c and os.path.exists(c):
             return c
     sys.exit("regression_gate: rexglue.exe not found (set REXGLUE)")
+
+
+def verify_pin(rexglue):
+    """A gate that never checks WHICH compiler produced the codegen is not a law.
+
+    The proof is this file's own first live run: the fleet's baselines were blessed
+    against SDK 981cab8, the SDK tree on the box sat 93 commits BEHIND that with
+    uncommitted local edits on top, and the codegen tier duly reported 19 of 30 titles
+    "REGRESSION" and told the operator to re-bless them. Not one title had regressed --
+    the gate had compared two different compilers and had no vocabulary to say so, and
+    the remedy it printed would have permanently frozen the wrong output as truth.
+    rexauto.py already refuses to run against an off-pin SDK (verify_sdk_pin); the gate
+    must refuse for the same reason and harder, because its verdict is the entire
+    evidence base for "no game regressed".
+
+    Deliberately gating an SDK change is still possible -- REXAUTO_SKIP_SDK_CHECK=1,
+    which rexauto's own checker honours -- but it has to be said out loud.
+    """
+    try:
+        rx = _load("rexauto", os.path.join(HERE, "rexauto.py"))
+    except Exception as ex:
+        sys.exit("regression_gate: could not load rexauto.py to verify the SDK pin (%s)\n"
+                 "  REFUSING to gate: an unverified compiler makes every verdict below "
+                 "meaningless." % ex)
+    rx.verify_sdk_pin({"rexglue": rexglue})
 
 
 def projects(names):
@@ -314,13 +357,25 @@ def main():
     runtime = "--runtime" in args
     names = [a for a in args if not a.startswith("--")]
     rexglue = find_rexglue()
+    verify_pin(rexglue)   # before a single title is codegen'd -- see verify_pin's docstring
     projs = projects(names)
     if not projs:
+        # Distinguish "you filtered wrong" from "the law is pointed at nothing". The
+        # second is exactly how this gate sat disarmed: an absent root is not an empty
+        # fleet, and it must never be reported as one.
+        if not os.path.isdir(AUTOPORTS):
+            sys.exit("regression_gate: fleet root does not exist: %s\n"
+                     "  the gate is DISARMED until this points at the live fleet "
+                     "(set REXAUTO_WORK)." % AUTOPORTS)
         sys.exit("regression_gate: no matching projects under %s" % AUTOPORTS)
     # light games first, heavy last
     projs.sort(key=lambda p: (p[0] in HEAVY, p[0]))
     print("regression_gate: %s %d project(s) with %s [codegen tier]" % (
         "BLESSING" if bless else "gating", len(projs), os.path.basename(rexglue)))
+    # Name the compiler in the log, not just its basename: a verdict is only as good as
+    # the binary that produced it, and "rexglue.exe" alone does not identify one.
+    print("  sdk: %s%s" % (rexglue, "  (PIN CHECK SKIPPED)"
+                           if os.environ.get("REXAUTO_SKIP_SDK_CHECK") else "  [pin verified]"))
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL) as ex:

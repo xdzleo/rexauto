@@ -22,7 +22,18 @@ import shutil
 import bisect
 import subprocess
 
-_DEF = re.compile(r"DEFINE_REX_FUNC\(sub_([0-9A-Fa-f]{8})\)")
+# The optional prefix is a companion module's `symbol_prefix`: an extra recompiled
+# XEX emits DEFINE_REX_FUNC(gamelogic_sub_880D0000), never a bare sub_. Without it
+# this pattern read every companion module's generated sources as EMPTY, so
+# func_bodies() returned {}, every deep-extract candidate looked "swallowed", and the
+# pure-add gate dropped all of them: 46,131 candidates across the fleet's 10 companion
+# modules, 0 accepted, every time -- Spider-Man's gamelogic alone 21,749 -> 0. Failing
+# closed meant nothing wrong was ever accepted, which is why it went unnoticed for so
+# long; it also meant static recovery never contributed one function to Halo 3, FIFA,
+# Forza Horizon, Sonic or Spider-Man's extra modules.
+# An entrypoint has no prefix, so the group matches empty and single-module titles are
+# byte-identical by construction.
+_DEF = re.compile(r"DEFINE_REX_FUNC\((?:[A-Za-z]\w*_)?sub_([0-9A-Fa-f]{8})\)")
 _GOTO = re.compile(r"goto loc_([0-9A-Fa-f]{8})")
 _LOC = re.compile(r"^loc_([0-9A-Fa-f]{8}):")
 

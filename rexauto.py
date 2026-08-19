@@ -86,9 +86,11 @@ def detect_env():
         "idat": e("IDAT") or shutil.which("idat") or newest_glob(
             os.path.join(pf, "IDA*", "idat.exe"), os.path.join(pf, "IDA*", "idat64.exe")),
         "sdk": e("REXSDK_DIR") or near("rexglue/sdk")
-        or find_first([r"C:\Skate3Recomp\rexglue-sdk\out\install\win-amd64"]),
+        or find_first([r"C:\Skate3\rexglue-sdk\out\install\win-amd64",
+                       r"C:\Skate3Recomp\rexglue-sdk\out\install\win-amd64"]),
         "rexglue": e("REXGLUE") or near("rexglue/tool/rexglue.exe") or shutil.which("rexglue")
-        or newest_glob(r"C:\Skate3Recomp\rexglue-sdk\out\win-amd64\*\rexglue.exe"),
+        or newest_glob(r"C:\Skate3\rexglue-sdk\out\win-amd64\*\rexglue.exe",
+                       r"C:\Skate3Recomp\rexglue-sdk\out\win-amd64\*\rexglue.exe"),
         "jt_repo": e("JT_REPO") or near("xenon-jumptables")
         or find_first([r"C:\xenon-jumptables"]),
         # a real python interpreter for the jump-table scripts (sys.executable is
@@ -137,7 +139,18 @@ class Ctx:
     def mark(self, stage, data=None):
         st = self.load_state()
         st[stage] = data if data is not None else True
-        json.dump(st, open(self.statefile, "w"), indent=1)
+        # Atomic: sibling tmp, fsync, os.replace. The old truncate-then-write
+        # (json.dump straight into open(path, "w")) leaves the checkpoint EMPTY for the
+        # width of the write, and load_state swallows a parse failure into {} -- so a
+        # crash, a kill, or a full disk mid-mark silently costs the port every finished
+        # stage, and the next run re-extracts, re-analyses and rebuilds from scratch
+        # with no error to explain why. os.replace is atomic on NTFS.
+        tmp = self.statefile + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(st, f, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.statefile)
 
 
 def run(cmd, **kw):
@@ -2554,7 +2567,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("container", help="STFS package, or a folder containing default.xex")
     ap.add_argument("--name", required=True, help="project name (a-z0-9_)")
-    ap.add_argument("--work", default=os.environ.get("REXAUTO_WORK", r"C:\Skate3Recomp\autoports"),
+    ap.add_argument("--work", default=os.environ.get("REXAUTO_WORK", r"C:\Skate3\autoports"),
                     help="output root (or env REXAUTO_WORK)")
     ap.add_argument("--run", action="store_true", help="launch the game at the end")
     ap.add_argument("--from", dest="from_stage", choices=STAGES, help="restart from this stage")
