@@ -1,5 +1,107 @@
 # Changelog
 
+## 2.26.0 — "the law was off" (2026-08-19)
+
+**The regression gate had been enforcing nothing, and nobody could rebuild the SDK it
+was supposed to enforce against.** This release fixes both, and the discovery order
+matters: the second bug was found *by* fixing the first.
+
+### The gate could not find the fleet, or its compiler
+
+`AUTOPORTS` was hardcoded to `C:\Skate3Recomp\autoports`. The fleet moved,
+`projects()` returned `[]`, and `main()` exited *"no matching projects"* — a line that
+reads like a mistyped filter, not like *the law is off*. `find_rexglue()` carried the
+same dead root, so repairing only the fleet path would still have died one line later.
+Both now honour `REXAUTO_WORK`, the env `rexauto.py --work` already reads, so the two
+cannot drift apart again; the old roots stay last for a machine still laid out that way.
+An absent root now says **DISARMED**.
+
+### The gate never checked which compiler it ran
+
+`regression_gate.py` contained **zero** references to `SDK_PIN`. Its first live run in
+weeks gated all 30 titles against an SDK **93 commits behind** the pin — a tree checked
+out on a different branch that nobody switched back — reported **19 REGRESSIONs**, and
+printed `--bless` as the remedy. Blessing would have frozen a stale compiler's output as
+the fleet's truth, permanently. With the pinned SDK the same run is **28/30
+byte-identical**: not one title had regressed.
+
+`verify_pin()` now runs before a single title is codegen'd, and the log names the full
+path of the binary that produced the verdict. `REXAUTO_SKIP_SDK_CHECK=1` still allows
+gating a deliberate SDK change — explicitly.
+
+### The pinned SDK could not be rebuilt, and never matched its own commit
+
+The shipped `rexglue.exe` already carried the `register_cpp.inja` whitespace trim, which
+is a **later** commit than the `981cab8` the pin named — so building the named commit
+produced a different binary and the pin was unreproducible by construction. Three
+independent defects kept it that way:
+
+- `CMakeLists.txt` aborts on MSVC without naming where Clang is expected.
+- The preset carries `-march=x86-64-v3`; a raw `cmake` invocation misses it and
+  `_mm_shuffle_epi8` fails to compile.
+- `INJA_TEMPLATE_FILES` was a hand-kept list that **omitted `register_cpp.inja`**, so
+  editing that template did not re-trigger the embed step: you rebuild, the binary keeps
+  the old template, and the output is unchanged. Found by experiment — edit, rebuild,
+  diff, find it identical. Fixed by adopting upstream `d33efdf` (GLOB_RECURSE +
+  CONFIGURE_DEPENDS) by content.
+
+**The SDK now builds from source and its codegen is byte-identical to the old pinned
+binary.** `SDK_PIN` is re-pinned to that from-source build.
+
+### Upstream harvest, measured
+
+Two codegen fixes adopted by content from `rexglue/rexglue-sdk` (no shared ancestry):
+`10cf1ad` recovers the function tail after a **conditional** `bcctr` — previously any
+`bcctr` terminated the function, so everything after a conditional one was dropped — and
+`f2b91f2` gives SEH funclets their owner's live non-volatiles. Both are **inert on this
+fleet**: adopting them left all 30 titles byte-identical. That verdict was only possible
+because the tree builds.
+
+`650a8c3` (`vaddsws`) was **rejected with cause, again**: v2.25 already refused it
+because our scalar version also sets `vscr_sat` and theirs does not. It is named here so
+a future bulk merge does not silently reintroduce it.
+
+### Static recovery reaches companion modules for the first time
+
+`DEFINE_REX_FUNC` was matched prefix-blind, so every companion module's generated sources
+read as **empty**: `func_bodies()` returned `{}`, every deep-extract candidate looked
+"swallowed", and the pure-add gate dropped all of them — **46,131 candidates across the
+fleet's 10 companion modules, 0 accepted, every time**. Failing closed is why nobody
+noticed; it also meant static recovery never contributed one function to Halo 3, FIFA,
+Forza Horizon, Sonic or Spider-Man's extra modules. An entrypoint emits no prefix, so
+single-module titles are byte-identical by construction.
+
+And deep-extract folded every accepted candidate as a bare `{}` **function head** — but
+an address INTERIOR to an emitted function can never be one: registering it asks the
+recompiler to split a routine it emitted whole, which it declines by design. So the gate
+dropped it and the address was lost. `stage_deepextract` now partitions against the
+recompiler's own emitted grid: gap candidates go to the unchanged pure-add gate, interior
+candidates go to a landing gate whose contract is that the emitted function SET must be
+unchanged and `count_dangling` must be 0, or the whole batch reverts.
+
+### Proof
+
+Full-fleet gate **PASS, 30/30 byte-identical**, pin verified. `func_bodies()` over the
+companion modules: **0 -> 139,854**, with the budokai3 entrypoint control unchanged at
+11,452. Landings folded with the function set unchanged and 0 dangling: budokai3 +115
+(holes 85 -> 84), spider_man/gamelogic +2,526 (holes 2,410 -> 2,364), sonic_adventure +68.
+
+Three baselines re-blessed, each with its cause recorded. `gears_of_war_judgment` is
+blessed on the **owner's decision, not on analysis**: its baseline predates the current
+pin and its inputs have not changed since 2 Jul, but the previous content is
+unrecoverable and the v2.25 jump-table hypothesis does not hold — three of its four
+changed files contain no switch case at all.
+
+### Known issues
+
+- One **unexplained transient**: `joust` failed codegen Validate once with 4 unresolved
+  calls, then passed twice with nothing changed. Not reproduced; recorded rather than
+  dismissed.
+- Every port's `CMakeCache.txt`, `_build.bat` and `game_root.txt` carried the dead root
+  too. Fixed on this machine's fleet; a port tree from elsewhere needs the same.
+- Graphics artefacts under `draw_resolution_scale=2x2` at 1440p are a rendering
+  configuration, not a recompilation regression.
+
 ## 2.25.0 — "both upstreams, merged" (2026-07-27)
 
 **The fork stops drifting.** rexglue has two living upstreams and we had fallen
