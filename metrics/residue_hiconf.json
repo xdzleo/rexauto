@@ -1,0 +1,966 @@
+{
+ "provenance": {
+  "when": "2026-08-19 10:04",
+  "work": "C:\\Skate3\\autoports",
+  "rexglue": "C:\\Skate3\\rexglue-sdk\\out\\install\\win-amd64\\bin\\rexglue.exe",
+  "rexglue_sha256": "cc042313bb3ac67412f829d7deae389417c461f1b419178423401672913f6466",
+  "tool_sha256": "e1a80f159020ace55b405205ce35a457a0d9507194c04617df2941041ec20ddf"
+ },
+ "tiers": {
+  "low-evidence": 31387,
+  "prologue": 54,
+  "crossed": 50
+ },
+ "hits": {
+  "ben_10_the_rise_of_hex": [
+   {
+    "addr": "0x82280018",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FF50"
+   },
+   {
+    "addr": "0x82280140",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FEC0"
+   },
+   {
+    "addr": "0x827EADA8",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "3964FF28"
+   },
+   {
+    "addr": "0x828159C0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x8282F7E0",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0060"
+   }
+  ],
+  "budokai3": [
+   {
+    "addr": "0x8221DDB0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "bully_scholarship_edition": [
+   {
+    "addr": "0x8219000C",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FF40"
+   },
+   {
+    "addr": "0x823C0008",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FF90"
+   },
+   {
+    "addr": "0x825D0080",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FF80"
+   },
+   {
+    "addr": "0x828BE1A0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "captain_america_super_soldier": [
+   {
+    "addr": "0x824A70F0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "crash_mind_over_mutant": [
+   {
+    "addr": "0x82300BA0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "dragon_ball_z_burst_limit": [
+   {
+    "addr": "0x822A4BD8",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x824D77B8",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "54AB063F"
+   }
+  ],
+  "dragon_ball_z_ultimate_tenkaichi": [
+   {
+    "addr": "0x8210FF00",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF70"
+   },
+   {
+    "addr": "0x822900A0",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FF70"
+   },
+   {
+    "addr": "0x82368E44",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF70"
+   },
+   {
+    "addr": "0x824309C8",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "fifa_street": [
+   {
+    "addr": "0x820FF498",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "fifa_street/fifadllzf": [
+   {
+    "addr": "0x827A7A98",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "ptr"
+    ],
+    "word": "80630034"
+   },
+   {
+    "addr": "0x82C5EC94",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FFA0"
+   },
+   {
+    "addr": "0x83034108",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "8167001C"
+   },
+   {
+    "addr": "0x83088410",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF90"
+   }
+  ],
+  "final_exam": [
+   {
+    "addr": "0x8262E578",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x82AA9498",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "915E0000"
+   },
+   {
+    "addr": "0x82AA966C",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "917E0000"
+   },
+   {
+    "addr": "0x82B8CC5C",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "81630164"
+   }
+  ],
+  "forza_horizon": [
+   {
+    "addr": "0x82A6FBC0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "forza_horizon/speechfacadedefault": [
+   {
+    "addr": "0x890E35A0",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "ptr"
+    ],
+    "word": "386302A0"
+   }
+  ],
+  "gears_of_war_3": [
+   {
+    "addr": "0x82CE8EB0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "gears_of_war_judgment": [
+   {
+    "addr": "0x82DBD420",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x82DD9AC4",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "89630015"
+   },
+   {
+    "addr": "0x83000500",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF50"
+   }
+  ],
+  "grand_theft_auto_v": [
+   {
+    "addr": "0x83639788",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "gta_san_andreas": [
+   {
+    "addr": "0x821719BC",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "7CE33B78"
+   },
+   {
+    "addr": "0x8264AC00",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF90"
+   },
+   {
+    "addr": "0x82847678",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF10"
+   },
+   {
+    "addr": "0x82B86F68",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x82B96190",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0060"
+   }
+  ],
+  "halo_3": [
+   {
+    "addr": "0x8225CAB8",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "C1BB0000"
+   },
+   {
+    "addr": "0x823DA5C0",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "57AB063E"
+   },
+   {
+    "addr": "0x8255A238",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF70"
+   },
+   {
+    "addr": "0x82580F68",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0060"
+   },
+   {
+    "addr": "0x82582A98",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x826F5EDC",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0144"
+   }
+  ],
+  "halo_3/waveshell": [
+   {
+    "addr": "0x880283EC",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "83DF00B4"
+   },
+   {
+    "addr": "0x880311D0",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "82FF0050"
+   },
+   {
+    "addr": "0x88047C04",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "83DF0094"
+   },
+   {
+    "addr": "0x8804D148",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "835F0050"
+   },
+   {
+    "addr": "0x8804EB60",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "83DF00C4"
+   },
+   {
+    "addr": "0x88058FE8",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "887F0050"
+   },
+   {
+    "addr": "0x88059088",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "887F0010"
+   },
+   {
+    "addr": "0x880592DC",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0050"
+   },
+   {
+    "addr": "0x880595CC",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0050"
+   }
+  ],
+  "halo_3/waveslib": [
+   {
+    "addr": "0x8A0200E8",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FF90"
+   },
+   {
+    "addr": "0x8A028CDC",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "83DF0094"
+   },
+   {
+    "addr": "0x8A06CDC8",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "835F0050"
+   },
+   {
+    "addr": "0x8A06E970",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "83DF00C4"
+   },
+   {
+    "addr": "0x8A0769A4",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "83DF00B4"
+   },
+   {
+    "addr": "0x8A078C14",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0050"
+   },
+   {
+    "addr": "0x8A079B28",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "887F0050"
+   },
+   {
+    "addr": "0x8A079BC8",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "887F0010"
+   },
+   {
+    "addr": "0x8A079E80",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0050"
+   },
+   {
+    "addr": "0x8A07A07C",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0050"
+   },
+   {
+    "addr": "0x8A07A36C",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0050"
+   }
+  ],
+  "joust": [
+   {
+    "addr": "0x82061DE8",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "laracroftandtheg": [
+   {
+    "addr": "0x82176EA0",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "81630000"
+   },
+   {
+    "addr": "0x824DD6A8",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "81630000"
+   },
+   {
+    "addr": "0x824DD6B8",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "81630000"
+   },
+   {
+    "addr": "0x825BCE60",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "ms_pac_man": [
+   {
+    "addr": "0x820912E0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "msmauto": [
+   {
+    "addr": "0x8228648C",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "396B0007"
+   },
+   {
+    "addr": "0x822A65A8",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "mssplosionman": [
+   {
+    "addr": "0x8228648C",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "396B0007"
+   },
+   {
+    "addr": "0x822A65A8",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "need_for_speed_carbon": [
+   {
+    "addr": "0x82110038",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FFA0"
+   },
+   {
+    "addr": "0x82200870",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF90"
+   },
+   {
+    "addr": "0x82430010",
+    "why": "prologue",
+    "classes": [
+     "splitimm"
+    ],
+    "word": "9421FFA0"
+   },
+   {
+    "addr": "0x827454D0",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "3964FF28"
+   },
+   {
+    "addr": "0x829436C0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x82A84140",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "54AB063F"
+   }
+  ],
+  "rayman3hd": [
+   {
+    "addr": "0x820E13F8",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x822FDC00",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "splitimm"
+    ],
+    "word": "807F0060"
+   },
+   {
+    "addr": "0x823E5370",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "3964FF28"
+   }
+  ],
+  "rise_of_the_tomb_raider": [
+   {
+    "addr": "0x821B1898",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF90"
+   },
+   {
+    "addr": "0x821C3870",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF50"
+   },
+   {
+    "addr": "0x822088E8",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF80"
+   },
+   {
+    "addr": "0x823E6078",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "7F0B3040"
+   },
+   {
+    "addr": "0x82497FF0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FEA0"
+   },
+   {
+    "addr": "0x82504208",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FF90"
+   },
+   {
+    "addr": "0x82B00790",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "saints_row": [
+   {
+    "addr": "0x827178B0",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "simpsons_game_the": [
+   {
+    "addr": "0x82403A58",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "7D034378"
+   },
+   {
+    "addr": "0x82432280",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x82676038",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "54AB063F"
+   },
+   {
+    "addr": "0x82BE2408",
+    "why": "crossed",
+    "classes": [
+     "b",
+     "bc"
+    ],
+    "word": "3964FF28"
+   }
+  ],
+  "sonic_adventure": [
+   {
+    "addr": "0x823817D8",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x824F8250",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "9421FEC0"
+   }
+  ],
+  "spider_man_shattered_dimensions": [
+   {
+    "addr": "0x82222E98",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "superman_returns": [
+   {
+    "addr": "0x82468D10",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "the_legend_of_korra": [
+   {
+    "addr": "0x82448930",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   }
+  ],
+  "wwe_smackdown_vs_raw_2007": [
+   {
+    "addr": "0x821D1098",
+    "why": "prologue",
+    "classes": [
+     "ptr"
+    ],
+    "word": "7D8802A6"
+   },
+   {
+    "addr": "0x8226DAA8",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "81630000"
+   },
+   {
+    "addr": "0x826F7F28",
+    "why": "crossed",
+    "classes": [
+     "ptr",
+     "splitimm"
+    ],
+    "word": "54AB063F"
+   }
+  ]
+ }
+}

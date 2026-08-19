@@ -110,6 +110,100 @@ def _write_candidates(functions_toml, addrs):
     open(functions_toml, "w", encoding="utf-8", newline="\n").write(txt)
 
 
+
+def split_by_grid(cands, gen, name):
+    """(gap_candidates, interior_candidates) against the recompiler's OWN emitted grid.
+
+    A deep-extract candidate that falls strictly inside an already-emitted function is
+    not a missing function -- it is an in-function address (a vtable slot or a computed
+    branch target landing mid-routine). Registering it as a standalone {} asks the
+    recompiler to SPLIT a routine it already emitted whole, which it declines to do, so
+    the pure-add gate drops it as "swallowed" and the address is lost. Measured on
+    budokai3: 115 of 116 candidates are interior, offsets 108..332 bytes into their
+    owning function, and the gate accepted 0.
+
+    heal.py's register_or_seed already routes this correctly -- but it keys on `end`
+    OVERRIDE spans, and the whole 30-title fleet holds about ten of those, so in practice
+    it routes almost nothing. The emitted grid is the signal that actually exists: it is
+    the recompiler's own multi-phase discovery output, the same grid boundaries.py reads.
+    """
+    heads = sorted(func_bodies(gen, name))
+    gap, interior = [], []
+    for a in cands:
+        i = bisect.bisect_right(heads, a) - 1
+        (interior if (i >= 0 and heads[i] < a) else gap).append(a)
+    return gap, interior
+
+
+def landing_gate(name, gen, forced_path, manifest, codegen_fn, landings, log=print,
+                 switch_path=None):
+    """Accept interior candidates as forced landings only if the emitted tree stays sane.
+
+    A landing is a `loc_` label inside an existing body, so the safety question is not
+    the pure-add gate's (which is about function heads) but this: after adding them, the
+    SET of emitted functions must be unchanged -- no head gained, none lost -- and no
+    dangling goto may appear. Either failure means a landing landed somewhere that is not
+    an instruction boundary, and the whole batch is reverted rather than gated down: a
+    bad label is a miscompile, not a missed opportunity.
+    """
+    import heal as _h
+    heads = sorted(func_bodies(gen, name))
+    before = set(heads)
+    bak = forced_path + ".q15.bak"
+    had = os.path.exists(forced_path)
+    if had:
+        shutil.copyfile(forced_path, bak)
+    n = _h.write_forced(forced_path, landings)
+    # NOT "if not n: return": a previous run may already hold these landings while the
+    # dispatcher cases were never written (the case half was starved by the end-override
+    # spans). Zero NEW labels does not mean zero work left.
+    _h.ensure_manifest_include(manifest, os.path.basename(forced_path))
+    # The label alone is inert for an INDIRECT target: the routine's bctr still falls to
+    # `default: REX_CALL_INDIRECT_FUNC`. The dispatcher needs a `case`, and with the
+    # switch-on-ctr lowering a case is keyed on the computed CTR value, not on an index,
+    # so adding one is purely additive -- an unreachable case costs nothing, a reachable
+    # one turns a FATAL into `goto loc_X`. extend_switch_table wants routine spans; give
+    # it the emitted grid, since the `end`-override spans it was written against barely
+    # exist (about ten across all 30 titles, so it returned 0 every time).
+    swbak = None
+    if switch_path and os.path.exists(switch_path):
+        swbak = switch_path + ".q16.bak"
+        shutil.copyfile(switch_path, swbak)
+        spans = [(heads[i], heads[i + 1]) for i in range(len(heads) - 1)]
+        ncase = _h.extend_switch_table(landings, switch_path, spans)
+        if ncase:
+            log("  landing gate: +%d dispatcher case(s) from the emitted grid" % ncase)
+        n += ncase
+    if not n:
+        return 0
+    codegen_fn()
+    after = set(func_bodies(gen, name))
+    dangling = count_dangling(gen, name)
+    if after != before or dangling:
+        log("  landing gate: REVERTING %d landing(s) -- heads %+d, dangling %d"
+            % (n, len(after) - len(before), dangling))
+        if had:
+            shutil.copyfile(bak, forced_path)
+        else:
+            try:
+                os.remove(forced_path)
+            except OSError:
+                pass
+        if swbak:
+            shutil.copyfile(swbak, switch_path)
+        codegen_fn()
+        n = 0
+    else:
+        log("  landing gate: +%d in-function landing(s); function set unchanged, 0 dangling" % n)
+    for b in (bak, swbak):
+        if b:
+            try:
+                os.remove(b)
+            except OSError:
+                pass
+    return n
+
+
 def pure_add_gate(rexglue, port, name, manifest, gen, functions_toml, candidates, codegen_fn, log=print,
                   baseline_current=False):
     """Return the subset of `candidates` that are provably pure additions. `codegen_fn()`
