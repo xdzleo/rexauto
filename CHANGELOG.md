@@ -1,5 +1,133 @@
 # Changelog
 
+## 2.27.0 — "the copy nobody needed" (2026-08-20)
+
+**Codegen is 20.7x faster and its output is byte-identical.** One line did it, and the
+line was not slow because of what it computed — it was slow because it computed
+something and threw it away, 65,000 times per title.
+
+### The line
+
+`phase_discover.cpp` opened each discovered function with:
+
+```cpp
+auto effectiveKnownFunctions = knownFunctions;
+```
+
+A deep copy of an `unordered_set` holding roughly 65,000 addresses — taken **once per
+discovered function**, and discovery runs about 65,000 times on a large title. Order
+n² node allocations against a per-call budget of ~1.9 ms.
+
+The copy existed only so two `erase()` loops below it could subtract configured chunks.
+Those loops read `chunksByParent`, which is populated exclusively from `functions.toml`
+entries carrying `parent`. **The entire 30-title fleet contains exactly one such
+entry** (`dragon_ball_z_burst_limit`). `forza_horizon` has none. So in almost every
+call both loops iterated an empty map and the copy was discarded bit-identical to its
+source.
+
+It is now an overlay: build the excluded set — nearly always empty — and materialise a
+copy only when something must actually be removed. The set is consulted downstream
+solely through `contains()`, so the two formulations are equivalent by construction.
+No threading, no ordering change, nothing to get subtly wrong.
+
+### Measured, not estimated
+
+Same manifest, same machine, the v2.26 pinned binary against this one:
+
+| title | functions | before | after | |
+|---|---:|---:|---:|---:|
+| joust | 7,045 | 2.0s | 1.0s | 2.1x |
+| ms_pac_man | 8,656 | 2.6s | 1.0s | 2.7x |
+| budokai3 | 11,687 | 3.9s | 1.0s | 4.0x |
+| halo_3 | 22,349 | 13.6s | 2.5s | 5.4x |
+| gears_of_war_3 | 56,880 | 105.6s | 5.9s | 18.0x |
+| gears_of_war_judgment | 59,681 | 110.5s | 6.4s | 17.2x |
+| forza_horizon | 76,936 | 188.8s | 6.0s | 31.7x |
+| grand_theft_auto_v | 94,334 | 234.4s | 8.2s | 28.6x |
+| **total** | | **661.4s** | **31.9s** | **20.7x** |
+
+Eight titles, chosen to span the fleet's size range; the other 22 were not timed.
+
+The shape is the evidence. Dividing each *before* by the square of its function count
+gives the same constant to within 2.6–4.0 × 10⁻⁸ across all eight — the signature of an
+O(n²) defect, arrived at from the stopwatch without looking at the code. Divide each
+*after* by function count, minus a ~0.7s process floor, and it is flat: 0.7–0.96 × 10⁻⁴
+seconds per function. That is the linear work that was always there.
+
+It also explains why Joust "only" gained 2.1x. Joust never had the problem. The fix
+pays out where n is large, which is exactly where it hurt: `grand_theft_auto_v` cost
+four minutes per codegen iteration, which in practice meant nobody iterated on it.
+
+### Byte-identical, proven three ways
+
+- The 30-title gate reports **28 PASS** and the two known intentional diffs.
+- Codegen of `forza_horizon` and `gears_of_war_judgment` under the old and new
+  compilers differs in **zero files** — so neither title's diff is attributable to this
+  change.
+- The whole-fleet gate now completes in **26 seconds**.
+
+### The gate found the wrong compiler again
+
+Preparing this release, a fleet run reported **19 REGRESSIONs** — the same count, and
+the same cause, as the v2.26 investigation. `find_rexglue()` listed
+`out/install/win-amd64` and not `out/install/win-amd64-pin`; those are different trees,
+the first being whatever the box last built for itself. With the pin check switched off
+by hand, the log's only record of which compiler produced the verdict was a path, and a
+path is not an identity.
+
+Two changes. The release build is now first in the candidate list. And when
+`REXAUTO_SKIP_SDK_CHECK` is set, the gate prints the compiler's **sha256**, so a verdict
+is attributable to a binary rather than to a directory name. The remedy the gate printed
+on that bad run was `--bless`; taking it would have frozen a stale compiler's output as
+the fleet's truth. That is the second time, and the reason the check exists.
+
+### From Xenia Canary, validated in gameplay
+
+Adopted by content — our `src/graphics` derives from `src/xenia/gpu` but is
+restructured, so these are ports, not cherry-picks:
+
+- **Empty resolve regions** now return true with a zero extent instead of failing.
+  Eliminated 20,256 failed draws per run.
+- **7-bit float mantissa** decoded with `<< 16`, not `<< 3`. The 3 was copied from the
+  20e4 decoder, where it is correct; a 7-bit mantissa needs 23−7.
+- **D3D12 scaled-resolve texture dimensions** now scale with the resolve factor. Vulkan
+  already did this; D3D12 did not, and the result was device removal — live by default.
+- **`XamMediaVerification`** implemented, killing a 600 ms spin in Gears of War
+  Judgment (281 calls → 1).
+- **`BaseHeap::Reset()`** recomputes `unreserved_page_count_`. Without it, a heap reset
+  left the counter permanently stale and the guest was told it had less free physical
+  memory than it did.
+- **Three `PhysicalHeap` parent-reservation leaks** released instead of TODO'd.
+- **`draw_resolution_scale`** defaults to 1, not 2.
+- **Perf frame counters** wired up: `ResetFrameCounters()` and `WriteCsvFrame()` were
+  fully implemented and called by nobody, and `PROFILE_FRAME_TIME_US` was never invoked
+  at all — anything read from that column was leftover array contents.
+
+### Community game patches
+
+`gamepatches.py` matches the xenia-canary game-patches catalogue against a port. The
+distinction it enforces is the one that matters for a *static* recompiler: a write
+landing in `.text` becomes native code and cannot be toggled at runtime. Each patch
+carries the worse of its writes' seals — **RECOMPILAR** or **RUNTIME** — rather than
+promising a switch that cannot exist.
+
+Gears of War Judgment ships with **Unlock FPS** and **Resolution Scaling Fix** applied.
+
+### Known, named, not fixed
+
+- **The thunk pool leaks.** `GetProcAddressByOrdinal` calls `AllocateThunk` on every
+  invocation with no memoization and no reclamation, so a guest resolving the same
+  export twice burns two 4-byte slots. `kThunkReserveSize` was raised 64KB → 1MB, which
+  moves the wall from 16,384 calls to 262,144 and fixes nothing. The real fix is a cache
+  keyed on (module, target) — which is also what hardware does — but that changes
+  dispatcher behaviour fleet-wide and is not runtime-validated, so it is not here. An
+  earlier version of that constant's comment cited a "Thunk address space exhausted"
+  log line as evidence; **no such line exists in any fleet log, and the claim is
+  withdrawn.**
+- **`frame_time_us` does not yet validate.** It is measured now, but summed frame times
+  come to 2.56x wall clock — almost certainly multi-thread contention on the static
+  `last_frame_close`. Treat the column as indicative, not authoritative.
+
 ## 2.26.0 — "the law was off" (2026-08-19)
 
 **The regression gate had been enforcing nothing, and nobody could rebuild the SDK it

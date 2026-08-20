@@ -2718,20 +2718,20 @@ def stage_run(ctx):
 # and tested with. Override (advanced, may produce broken builds) by setting
 # REXAUTO_SKIP_SDK_CHECK=1. Bump these when the bundled SDK is updated.
 SDK_PIN = {
-    # v2.26: re-pinned to an SDK built FROM SOURCE, which the previous pin was not.
-    # The shipped 981cab8 binaries already carried the register_cpp.inja whitespace
-    # trim (a LATER commit), so building the named commit did not reproduce them and
-    # nobody could rebuild the pinned SDK. Three independent defects made a from-source
-    # build impossible or silently wrong: CMakeLists aborts on MSVC without naming
-    # Clang, the preset carries -march=x86-64-v3 that a raw cmake invocation misses
-    # (_mm_shuffle_epi8 fails to compile without it), and INJA_TEMPLATE_FILES was a
-    # hand-kept list that omitted register_cpp.inja, so editing a template did not
-    # re-trigger the embed step. All three fixed; the tree now builds and its codegen
-    # is byte-identical to the old pinned binary on 27 of 30 fleet titles (the other 3
-    # carry intentional, blessed changes). Source: 981cab8 + 6f95a19 + d33efdf +
-    # upstream 10cf1ad + f2b91f2 (both verified inert on this fleet).
-    "rexglue.exe": "58013dfed1c6d063efe9a8110847526bd8006088f71f2d88fffef0c3c645f92f",
-    "rexruntime.dll": "b9ecd954e62141525685c5bdf94642af0bb5e0315093fd3830c307053d9514ac",
+    # v2.27: re-pinned to rexglue-sdk f9b732b, which removes the per-function deep copy
+    # of the known-function set in phase_discover. Codegen is 20.7x faster across the
+    # measured fleet (661.4s -> 31.9s on eight titles spanning 7k to 94k functions) and
+    # byte-identical: the 30-title gate reports 28 PASS plus the two intentional diffs,
+    # and an old-vs-new codegen of both of those differs in ZERO files.
+    #
+    # Also carries the Xenia Canary content adoptions validated in gameplay: the empty
+    # resolve region returning true with zero extent, the 7-bit float mantissa shift
+    # (<<3 -> <<16), the D3D12 scaled-resolve texture dimensions, XamMediaVerification,
+    # the BaseHeap::Reset free-page recount, the three PhysicalHeap parent-reservation
+    # leaks, draw_resolution_scale defaulting to 1, and the perf frame counters wired to
+    # something that actually closes a frame.
+    "rexglue.exe": "c768c4fb1c3a427c6d11e23ceeabe3e72dfbff44d08c59532c44dc8212fc0481",
+    "rexruntime.dll": "c3a96c19523de3ad1682e95f540bb12661cbf81df03b63834baf7656b688f388",
 }
 
 

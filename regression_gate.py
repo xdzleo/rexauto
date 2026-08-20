@@ -84,6 +84,16 @@ except Exception:
 
 def find_rexglue():
     cands = [os.environ.get("REXGLUE"),
+             # NOTE the ordering trap this list used to set. out/install/win-amd64 is a
+             # DIFFERENT tree from out/install/win-amd64-pin: the first is whatever the box
+             # last built for itself, the second is the release build. With only the former
+             # listed, a run that skips the pin check silently gates against the wrong
+             # compiler and reports every SDK-sensitive title as a regression -- which is
+             # exactly how the v2.26 investigation started, and it recurred while preparing
+             # v2.27 (19 false REGRESSIONs, one keystroke from being blessed as truth). The
+             # pin build now comes first, and a skipped pin check prints the binary's
+             # sha256 so a verdict is attributable to a compiler rather than to a path.
+             r"C:\Skate3\rexglue-sdk\out\install\win-amd64-pin\bin\rexglue.exe",
              r"C:\Skate3\rexglue-sdk\out\install\win-amd64\bin\rexglue.exe",
              r"C:\Skate3Recomp\rexglue-sdk\out\install\win-amd64\bin\rexglue.exe"]
     for root in (r"C:\Skate3\rexglue-sdk", r"C:\Skate3Recomp\rexglue-sdk"):
@@ -155,8 +165,8 @@ def baseline_path(name):
     return os.path.join(BASELINES, name + ".json")
 
 
-def run_one(name, port, man, rexglue, bless):
-    rc, tail = codegen(rexglue, port, man)
+def run_one(name, port, man, rexglue, bless, verify=False):
+    rc, tail = (0, "") if verify else codegen(rexglue, port, man)
     bpath = baseline_path(name)
     base = json.load(open(bpath)) if os.path.exists(bpath) else None
 
@@ -355,6 +365,11 @@ def main():
     args = sys.argv[1:]
     bless = "--bless" in args
     runtime = "--runtime" in args
+    # --verify: hash the generated tree AS IT STANDS against the baselines, regenerating
+    # nothing. The normal tier re-runs codegen per title -- ~160s on forza_horizon -- and
+    # when you are iterating on a port's functions.toml you have ALREADY generated the
+    # tree and only want to know what it differs from now. Same comparison, same verdict.
+    verify = "--verify" in args
     names = [a for a in args if not a.startswith("--")]
     rexglue = find_rexglue()
     verify_pin(rexglue)   # before a single title is codegen'd -- see verify_pin's docstring
@@ -370,16 +385,22 @@ def main():
         sys.exit("regression_gate: no matching projects under %s" % AUTOPORTS)
     # light games first, heavy last
     projs.sort(key=lambda p: (p[0] in HEAVY, p[0]))
-    print("regression_gate: %s %d project(s) with %s [codegen tier]" % (
-        "BLESSING" if bless else "gating", len(projs), os.path.basename(rexglue)))
+    print("regression_gate: %s %d project(s) with %s [codegen tier%s]" % (
+        "BLESSING" if bless else "gating", len(projs), os.path.basename(rexglue),
+        ", VERIFY-ONLY (tree as-is)" if verify else ""))
     # Name the compiler in the log, not just its basename: a verdict is only as good as
     # the binary that produced it, and "rexglue.exe" alone does not identify one.
     print("  sdk: %s%s" % (rexglue, "  (PIN CHECK SKIPPED)"
                            if os.environ.get("REXAUTO_SKIP_SDK_CHECK") else "  [pin verified]"))
+    if os.environ.get("REXAUTO_SKIP_SDK_CHECK"):
+        # With the check off, the path is the only identity the log carries -- and a
+        # path is not an identity, because two builds live under out/install. Hash it.
+        import hashlib
+        print("  sdk sha256: %s" % hashlib.sha256(open(rexglue, "rb").read()).hexdigest())
 
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_PARALLEL) as ex:
-        futs = {ex.submit(run_one, n, p, m, rexglue, bless): n for (n, p, m) in projs}
+        futs = {ex.submit(run_one, n, p, m, rexglue, bless, verify): n for (n, p, m) in projs}
         for fut in concurrent.futures.as_completed(futs):
             name, verdict, detail = fut.result()
             results[name] = verdict
