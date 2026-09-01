@@ -1,5 +1,33 @@
 # Changelog
 
+## 2.27.1 — "the button that did nothing" (2026-09-01)
+
+**Setup → Install ReXGlue SDK now actually installs it.** `rexauto`-only; **SDK
+unchanged** (`rexglue-sdk-win64.zip` and `SDK_PIN` identical to 2.27.0).
+
+### The bug
+
+The one-click SDK install downloaded the bundle every time and then reported
+"ReXGlue SDK installed" — and the Setup row kept saying **not found**. The download
+was never the problem. `rexglue-sdk-win64.zip` is a plain install tree (`bin/`
+`include/` `lib/` `share/` at its root), and `install_rexglue()` just `extractall()`'d
+it next to the app. `detect_env()` looks for `rexglue\tool\rexglue.exe` and
+`rexglue\sdk`, so nothing was ever found, while `<app>\bin`, `<app>\include`, … piled
+up beside `rexauto.exe` on every click.
+
+### The fix (`gui/setup.py`)
+
+- The archive is laid out as `rexglue\sdk` (the CMake prefix the build stage passes as
+  `CMAKE_PREFIX_PATH`) with `rexglue.exe` / `rexruntime.dll` / `TracyClient.dll`
+  mirrored into `rexglue\tool`. A bundle already wrapped in `rexglue/` is still accepted.
+- After extraction the installer re-runs `detect_env()` and only reports success if the
+  SDK is actually visible. Before, success was unconditional.
+- A truncated download, or a non-zip response (a GitHub error page), is reported as an
+  error instead of raising inside `ZipFile`. Requests carry a User-Agent; timeout 60 s.
+
+If you clicked the old button, the stray `bin/ cmake/ include/ lib/ licenses/ share/`
+folders next to `rexauto.exe` can be deleted.
+
 ## 2.27.0 — "the copy nobody needed" (2026-08-20)
 
 **Codegen is 20.7x faster and its output is byte-identical.** One line did it, and the
