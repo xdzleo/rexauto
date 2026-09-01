@@ -308,7 +308,7 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:14px;
           <span class="chip" id="chipfmt">FORMAT <b>—</b></span>
         </div>
       </div>
-      <div class="cpath" id="cpath">Point at an STFS container or an extracted game folder, then Recompile.</div>
+      <div class="cpath" id="cpath">Point at an STFS / GoD / ISO container or an extracted game folder, then Recompile.</div>
     </section>
 
     <section class="glass pipe-panel">
@@ -324,7 +324,7 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:14px;
 
   <section class="control">
     <div class="field"><label>TARGET</label>
-      <input id="container" spellcheck="false" placeholder="C:\path\to\container or extracted game folder">
+      <input id="container" spellcheck="false" placeholder="C:\path\to\container (STFS, GoD folder, ISO) or extracted game folder">
     </div>
     <div class="field nm"><label>NAME</label>
       <input id="name" spellcheck="false" value="game">
@@ -439,7 +439,7 @@ function setStatus(txt,color){document.getElementById('statustxt').textContent=t
 function applyMeta(m){
   document.getElementById('gtitle').textContent=m.title||document.getElementById('name').value||'Untitled';
   document.querySelector('#chipid b').textContent=m.title_id||'—';
-  document.querySelector('#chipfmt b').textContent=m.container&&/\.(iso)$/i.test(m.container)?'ISO':(m.cover?'STFS':'FOLDER');
+  document.querySelector('#chipfmt b').textContent=m.format||(m.container&&/\.(iso)$/i.test(m.container)?'ISO':(m.cover?'STFS':'FOLDER'));
   const coverEl=document.getElementById('cover'), glowEl=document.getElementById('cglow');
   if(m.cover){coverEl.src=m.cover; coverEl.style.opacity='1';
     glowEl.style.backgroundImage=`url(${m.cover})`; glowEl.style.backgroundSize='cover';

@@ -2856,7 +2856,7 @@ def publish_gabarito(ctx):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("container", help="STFS package, or a folder containing default.xex")
+    ap.add_argument("container", help="STFS package, GoD header file or folder, Xbox 360 ISO, or a folder containing default.xex")
     ap.add_argument("--name", required=True, help="project name (a-z0-9_)")
     ap.add_argument("--work", default=os.environ.get("REXAUTO_WORK", r"C:\Skate3\autoports"),
                     help="output root (or env REXAUTO_WORK)")

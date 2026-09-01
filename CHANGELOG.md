@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.28.0 — "forty-four fragments" (2026-09-01)
+
+**Games on Demand containers work, multi-part included.** `rexauto`-only; **SDK
+unchanged** (`rexglue-sdk-win64.zip` and `SDK_PIN` identical to 2.27.0).
+
+### The wall
+
+Every retail-sized GoD is multi-part — `<TITLEID>/00007000/<hash>` plus
+`<hash>.data/Data0000..DataNNNN`, 0xA290000 bytes each — and `extract.py` refused
+all of them: *"multi-part GoD (44 data files) is not handled — convert to ISO"*.
+Only the single-file SVOD layout (a repack curiosity) was readable, so in practice
+"GoD support" meant "convert it to ISO first". Gears of War: Judgment, 44 fragments,
+7.3 GB, was the test case.
+
+### The fix (`extract.py`)
+
+- **`_svod_reader` replicates xenia's `BlockToOffsetSVOD` / `ReadSVOD` in full.** A
+  GDFX sector maps to *(fragment index, offset)*: 0x14388 data blocks per fragment,
+  a 0x1000 Level-0 hash table before every 0x198 blocks, a Level-1 table before every
+  0xA1C4 L0 tables, the end-of-fragment wrap into `+0x2000` of the next file. The
+  fragments are opened from `<header>.data/` sorted by name and their count checked
+  against the header's `data_file_count` (0x39D) — a partial copy fails up front,
+  not as a corrupt asset later.
+- **Layout detection follows xenia exactly.** EGDF (header flag → magic @0x2000),
+  XSF (magic @0x12000, `XSF` stub @0x2000 — what every third-party converter emits),
+  single-file (@0xD000). The old reader added `svod_base_offset` for every layout;
+  xenia only adds it for single-file. That was masked before because the single-file
+  path was the only one that ran.
+- **The GDFX volume descriptor is read at the magic offset**, not via "sector 32":
+  under EGDF those are different places. `_gdfx_extract` takes the reader's `vd`
+  when it has one.
+- **Contiguous runs are coalesced.** Blocks between two hash tables are physically
+  contiguous, so `read_sector` reads up to 0x198 of them per syscall instead of one.
+  The 7.3 GB title extracts in about ten seconds from a warm cache.
+- **Point it at any folder above the header.** `find_god_header()` mirrors xenia's
+  `ResolveFromFolder`: walks the tree (depth ≤ 4) for a CON/LIVE/PIRS package with
+  SVOD volume type, preferring the one with its `.data` folder beside it. So the
+  container box accepts `…\Gears of War Judgment`, `…\4D530A26`, or the header file.
+- **Package meta comes from the LIVE header.** Title (*Gears of War: Judgment*),
+  title ID, and cover art now show for GoD folders, and `read_package_meta` reports
+  `format` (`GOD` / `STFS` / `ISO` / `XEX` / `FOLDER`), which the GUI chip displays
+  instead of guessing from the extension.
+
+### Verified
+
+- **Every data block, against the container's own hashes.** The SVOD Level-0 tables
+  hold the SHA-1 of each 0x1000 block pair. Reading the whole title back through the
+  new reader and hashing: **1,797,408 pairs OK, 0 bad** — the 44-fragment mapping,
+  including every fragment boundary and the wrap rule, is byte-exact.
+- GDFX directory: 1,938 files, all present at the listed size; 34 files straddle a
+  fragment boundary. `default.xex` parses as XEX2 (18 optional headers); all 1,841
+  cooked UE3 packages open with the big-endian package tag.
+- `rexauto.py <GoD folder> --only extract` runs the stage end-to-end.
+
 ## 2.27.1 — "the button that did nothing" (2026-09-01)
 
 **Setup → Install ReXGlue SDK now actually installs it.** `rexauto`-only; **SDK

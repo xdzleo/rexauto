@@ -8,8 +8,13 @@ stfs_container_device.cpp / stfs_xbox.h (which derive from xenia). Read-only
 including subdirectories. Read-write packages with *fragmented* files are flagged
 (their secondary-hash-table chain selection is not replicated).
 
+Games on Demand (GoD / SVOD) packages are read natively, single- or multi-part:
+point at the LIVE header file ('<TITLEID>/00007000/<hash>') or at any folder
+above it -- the header is located and its '.data/Data0000..' fragments walked
+with xenia's BlockToOffsetSVOD block math. Xbox 360 ISOs (GDFX) likewise.
+
 For an already-extracted game (a folder that contains default.xex) the folder is
-used directly as the game root, so GoD/ISO titles extracted by other means (e.g.
+used directly as the game root, so titles extracted by other means (e.g.
 god2iso.ps1) drop straight in with no copy.
 
 Used as a module (extract_container -> (xex_path, game_dir)) or standalone:
@@ -196,11 +201,20 @@ def read_package_meta(container):
     containers fall back to a title derived from the file name (so the GUI still
     shows a sensible name instead of the generic 'game'). None fields if nothing
     is available."""
-    meta = {"title": None, "title_id": None, "cover": None}
+    meta = {"title": None, "title_id": None, "cover": None, "format": None}
     fallback_title = title_from_filename(container)
     try:
         if os.path.isdir(container):
             meta["title"] = fallback_title
+            meta["format"] = "FOLDER"
+            if not _find_default_xex(container):
+                # a GoD folder: the LIVE header inside carries the real title,
+                # title_id and cover, so read the package meta from it instead
+                hdr = find_god_header(container)
+                if hdr:
+                    m = read_package_meta(hdr)
+                    m["title"] = m.get("title") or fallback_title
+                    return m
             try:
                 meta["title_id"] = _container_title_id(container)
             except Exception:
@@ -212,15 +226,21 @@ def read_package_meta(container):
         meta["title"] = fallback_title
         return meta
     if d[:4] not in (b"CON ", b"LIVE", b"PIRS"):
-        # ISO (GDFX), GoD (SVOD), folder or raw XEX: no STFS header -> title from
-        # the file name, and (best-effort, for cover art) the title_id read from
-        # the default.xex's XEX2 execution-info header.
+        # ISO (GDFX) or raw XEX: no STFS header -> title from the file name, and
+        # (best-effort, for cover art) the title_id read from the default.xex's
+        # XEX2 execution-info header.
         meta["title"] = fallback_title
+        meta["format"] = "XEX" if d[:4] == b"XEX2" else "ISO"
         try:
             meta["title_id"] = _container_title_id(container)
         except Exception:
             pass
         return meta
+    try:
+        vol_type = struct.unpack_from(">I", d, 0x3A9)[0]
+        meta["format"] = "GOD" if vol_type == 1 else "STFS"
+    except Exception:
+        meta["format"] = "STFS"
     try:
         name = d[0x411:0x411 + 0x80].decode("utf-16-be", "ignore").split("\x00")[0].strip()
         meta["title"] = name or fallback_title
@@ -565,7 +585,9 @@ def _walk_gdfx(read_sector, root_sector, root_size):
 
 def _gdfx_extract(read_sector, out_dir, log, only=None):
     """Extract a GDFX filesystem (via read_sector(sector, nbytes)) to out_dir."""
-    vd = read_sector(32, 0x800)            # volume descriptor @ sector 32 (0x10000)
+    # volume descriptor @ sector 32 (0x10000) -- unless the reader already knows
+    # where it is (SVOD layouts put it at a fixed offset in fragment 0)
+    vd = getattr(read_sector, "vd", None) or read_sector(32, 0x800)
     if vd[:20] != GDFX_MAGIC:
         raise SystemExit("no GDFX volume found (layout not handled) — try converting to ISO")
     root_sector, root_size = struct.unpack_from("<II", vd, 0x14)
@@ -606,45 +628,143 @@ def _iso_base(path):
     return None
 
 
+def _svod_data_files(hdr_path, data_file_count):
+    """The SVOD data fragments for a GoD header file. A multi-part GoD keeps them
+    in '<header>.data/Data0000..DataNNNN' (sorted by name, like xenia); a
+    single-file SVOD carries its data in the header file itself."""
+    if data_file_count <= 1:
+        return [hdr_path]
+    ddir = hdr_path + ".data"
+    if not os.path.isdir(ddir):
+        raise SystemExit("multi-part GoD: header says %d data files but %s does not exist"
+                         % (data_file_count, ddir))
+    parts = sorted(fn for fn in os.listdir(ddir)
+                   if os.path.isfile(os.path.join(ddir, fn)))
+    if len(parts) != data_file_count:
+        raise SystemExit("multi-part GoD: header expects %d data files, %s holds %d "
+                         "(incomplete copy?)" % (data_file_count, ddir, len(parts)))
+    return [os.path.join(ddir, fn) for fn in parts]
+
+
 def _svod_reader(src, hdr, log):
-    """Build a GDFX read_sector over an SVOD (GoD) container, single-file layout.
-    Implemented from rexglue's BlockToOffsetSVOD; validated by the GDFX magic
-    check in _gdfx_extract, so a layout it gets wrong fails loudly, not silently."""
+    """Build a GDFX read_sector over an SVOD (Games on Demand) container, single-
+    or multi-file. Replicates xenia's StfsContainerDevice::BlockToOffsetSVOD /
+    ReadSVOD (rexglue's stfs_container_device.cpp derives from the same code):
+
+      - data blocks are 0x800 bytes; every 0x198 of them is preceded by a 0x1000
+        Level-0 hash table, every 0xA1C4 L0 tables by a 0x1000 Level-1 table;
+      - fragments are 0xA290000 bytes = 0x14388 data blocks + their hash tables,
+        so a block maps to (fragment index, offset within that fragment);
+      - the header's svod_base_offset (0xB000) is only part of the offset for
+        the single-file layout, where the STFS header precedes the data.
+
+    The GDFX volume descriptor lives at a fixed 'magic offset' in fragment 0
+    (0x2000 EGDF / 0x12000 XSF / 0xD000 single-file) and is exposed as
+    read_sector.vd, so _gdfx_extract does not have to find it via sector 32
+    (which is not where EGDF puts it). A layout mismatch fails loudly on the
+    magic check, never silently."""
     vd = 0x379
     egdf = bool(hdr[vd + 0x18] & 0x40)
     start_data_block = u24le(hdr[vd + 0x1C:vd + 0x1F])
     data_file_count = struct.unpack_from(">I", hdr, 0x39D)[0]
-    if data_file_count > 1:
-        raise SystemExit("multi-part GoD (%d data files) is not handled — convert to ISO"
-                         % data_file_count)
-    f = open(src, "rb")
-    svod_base_offset = 0
-    for off, lay in ((0x2000, "egdf"), (0x12000, "xsf"), (0xD000, "single")):
-        f.seek(off)
-        if f.read(20) == GDFX_MAGIC:
-            svod_base_offset = {"egdf": 0, "xsf": 0x10000, "single": 0xB000}[lay]
-            log("SVOD layout: %s (magic @0x%X)" % (lay, off))
-            break
+    paths = _svod_data_files(src, data_file_count)
+    files = [open(p, "rb") for p in paths]
+    f0 = files[0]
+
+    def magic_at(off):
+        f0.seek(off)
+        return f0.read(20) == GDFX_MAGIC
+
+    if egdf:
+        if not magic_at(0x2000):
+            raise SystemExit("GoD header says EGDF layout but no GDFX magic at 0x2000")
+        layout, magic_off, base = "egdf", 0x2000, 0
+    elif magic_at(0x12000):
+        f0.seek(0x2000)
+        layout = "xsf" if f0.read(3) == b"XSF" else "xsf-noheader"
+        magic_off, base = 0x12000, 0x10000
+    elif magic_at(0xD000):
+        if data_file_count > 1:
+            raise SystemExit("GoD: GDFX magic at 0xD000 (single-file layout) but the "
+                             "header declares %d data files" % data_file_count)
+        layout, magic_off, base = "single", 0xD000, 0xB000
+    else:
+        raise SystemExit("GoD: could not locate the GDFX magic block in %s" % paths[0])
+    log("GoD / SVOD: %d data file%s, %s layout (magic @0x%X)"
+        % (len(paths), "" if len(paths) == 1 else "s", layout, magic_off))
+
     BPF, MAXF = 0x14388, 0xA290000
 
     def block_to_offset(block):
         tb = block - start_data_block * 2 + (2 if egdf else 0)
         fb, fi = tb % BPF, tb // BPF
         l0 = fb // 0x198 + 1
-        offset = l0 * 0x1000 + (l0 // 0xA1C4 + 1) * 0x1000 + svod_base_offset
+        offset = l0 * 0x1000 + (l0 // 0xA1C4 + 1) * 0x1000
+        if layout == "single":
+            offset += base
         addr = fb * 0x800 + offset
         if addr >= MAXF:
             fi += 1
             addr = addr % MAXF + 0x2000
-        return addr
+        return fi, addr
 
     def read_sector(sector, n):
+        # coalesce runs of physically contiguous blocks (up to 0x198 of them
+        # between two hash tables) into single reads -- a per-block seek+read
+        # over a multi-GB title is otherwise the slow part of extraction.
         out = bytearray()
-        for i in range((n + 0x7FF) // 0x800):
-            f.seek(block_to_offset(sector + i))
-            out += f.read(0x800)
+        count = (n + 0x7FF) // 0x800
+        i = 0
+        while i < count:
+            fi, addr = block_to_offset(sector + i)
+            run = 1
+            while i + run < count and block_to_offset(sector + i + run) == (fi, addr + run * 0x800):
+                run += 1
+            if fi >= len(files):
+                raise SystemExit("GoD: block %d maps to data file #%d but only %d exist "
+                                 "(truncated GoD?)" % (sector + i, fi, len(files)))
+            files[fi].seek(addr)
+            chunk = files[fi].read(run * 0x800)
+            if len(chunk) != run * 0x800:
+                raise SystemExit("GoD: short read in %s @0x%X (truncated GoD?)"
+                                 % (paths[fi], addr))
+            out += chunk
+            i += run
         return bytes(out[:n])
+
+    f0.seek(magic_off)
+    read_sector.vd = f0.read(0x800)
     return read_sector
+
+
+def find_god_header(folder, max_depth=4):
+    """Locate a GoD (SVOD) header file under a folder: a CON/LIVE/PIRS package
+    whose volume type is SVOD -- e.g. '<title>/4D530A26/00007000/58F54A32...'.
+    Prefers a header that has its '.data' fragment folder beside it. Returns
+    the header path or None. Mirrors xenia's ResolveFromFolder, bounded."""
+    folder = os.path.abspath(folder)
+    best = None
+    for root, dirs, files in os.walk(folder):
+        depth = root[len(folder):].count(os.sep)
+        if depth >= max_depth:
+            dirs[:] = []
+        for fn in files:
+            p = os.path.join(root, fn)
+            try:
+                if os.path.getsize(p) < 0x3B0:
+                    continue
+                with open(p, "rb") as f:
+                    head = f.read(0x3B0)
+            except OSError:
+                continue
+            if head[:4] not in (b"CON ", b"LIVE", b"PIRS"):
+                continue
+            if struct.unpack_from(">I", head, 0x3A9)[0] != 1:       # SVOD only
+                continue
+            if os.path.isdir(p + ".data"):
+                return p
+            best = best or p
+    return best
 
 
 def extract_container(src, out_dir, log=print):
@@ -654,7 +774,13 @@ def extract_container(src, out_dir, log=print):
     if os.path.isdir(src):
         xex = _find_default_xex(src)
         if not xex:
-            raise SystemExit("folder has no default.xex: %s" % src)
+            # not extracted -- maybe a GoD folder ('<title>/<TITLEID>/00007000/<hdr>'
+            # + '<hdr>.data/Data0000..'); resolve the header and extract that.
+            hdr = find_god_header(src)
+            if hdr:
+                log("GoD folder -> header %s" % os.path.relpath(hdr, src))
+                return extract_container(hdr, out_dir, log)
+            raise SystemExit("folder has no default.xex and no GoD package: %s" % src)
         log("using extracted game folder in place: %s" % src)
         # A hand-extracted folder can silently carry the scars of a truncated
         # download (7z & friends extract what they can from a cut-off archive and
