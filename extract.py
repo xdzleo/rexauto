@@ -195,6 +195,51 @@ def project_name_from_title(title, fallback="game"):
     return n or fallback
 
 
+def normalize_container(path):
+    """Turn whatever was pasted into the container box into a real path.
+
+    Explorer's address bar hands out 'search-ms:displayname=...&crumb=location:
+    C%3A%5CUsers%5CAdmin%5CDownloads\\Gears of War Judgment' when a folder is
+    opened from a search-results view; the crumb is the search root and the
+    tail after the last backslash is the folder that was actually opened.
+    Resolve it by looking for that name under the root (a few levels deep).
+    Quotes and whitespace are stripped; a path that exists is returned as-is."""
+    import re
+    from urllib.parse import unquote
+    p = (path or "").strip().strip('"').strip()
+    if not p:
+        return p
+    if os.path.exists(p):
+        return p
+    m = re.match(r"search-ms:(.*)", p, re.I)
+    if m:
+        crumb = re.search(r"crumb=location:([^&]*)", m.group(1))
+        root = unquote(crumb.group(1)) if crumb else ""
+        # 'C:\Users\Admin\Downloads\Gears of War Judgment' -> root + wanted leaf
+        tail = ""
+        if "\\" in root:
+            head, tail = root.rsplit("\\", 1)
+            if not os.path.isdir(root) and os.path.isdir(head):
+                root = head
+        if root and os.path.isdir(root):
+            if not tail:
+                return root
+            want = tail.lower()
+            hits = []
+            for r, dirs, files in os.walk(root):
+                if r[len(root):].count(os.sep) >= 3:
+                    dirs[:] = []
+                for n in dirs + files:
+                    if n.lower() == want:
+                        hits.append(os.path.join(r, n))
+            if hits:
+                return sorted(hits, key=len)[0]
+            raise SystemExit("container: the Explorer search path points at '%s' but no "
+                             "file or folder by that name was found under %s -- paste the "
+                             "real path instead" % (tail, root))
+    return p
+
+
 def read_package_meta(container):
     """Best-effort (title, title_id, cover_png_bytes) from a container.
     STFS packages yield the real title/id/cover from the header; ISO/GoD/folder
@@ -202,6 +247,10 @@ def read_package_meta(container):
     shows a sensible name instead of the generic 'game'). None fields if nothing
     is available."""
     meta = {"title": None, "title_id": None, "cover": None, "format": None}
+    try:
+        container = normalize_container(container)
+    except SystemExit:
+        pass
     fallback_title = title_from_filename(container)
     try:
         if os.path.isdir(container):
@@ -770,6 +819,10 @@ def find_god_header(folder, max_depth=4):
 def extract_container(src, out_dir, log=print):
     """Return (default_xex_path, game_dir). game_dir is the folder to use as the
     ReXGlue game root (it always contains the returned default.xex)."""
+    src = normalize_container(src)
+    if not os.path.exists(src):
+        raise SystemExit("container not found: %s" % src)
+
     # already-extracted folder: use it in place, no copy
     if os.path.isdir(src):
         xex = _find_default_xex(src)
