@@ -116,7 +116,7 @@ class Hub:
         meta = _extract.read_package_meta(container)
         cover = _cover_data_url(meta)
         self.emit({"type": "meta", "title": meta.get("title") or name,
-                   "title_id": meta.get("title_id"), "cover": cover,
+                   "title_id": meta.get("title_id"), "cover": cover, "format": meta.get("format"),
                    "container": container, "name": name})
         self.emit({"type": "stage", "stage": "extract", "status": "pending"})
         threading.Thread(target=self._run, args=(container, name, do_run), daemon=True).start()
@@ -244,7 +244,8 @@ class Handler(BaseHTTPRequestHandler):
             cover = _cover_data_url(meta)
             return self._send(200, "application/json",
                               json.dumps({"title": meta.get("title"),
-                                          "title_id": meta.get("title_id"), "cover": cover}))
+                                          "title_id": meta.get("title_id"), "cover": cover,
+                                          "format": meta.get("format")}))
         if u.path == "/api/deps":
             return self._send(200, "application/json", json.dumps({"items": _setup.deps_status()}))
         if u.path == "/api/events":
