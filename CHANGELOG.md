@@ -54,6 +54,14 @@ Only the single-file SVOD layout (a repack curiosity) was readable, so in practi
   cooked UE3 packages open with the big-endian package tag.
 - `rexauto.py <GoD folder> --only extract` runs the stage end-to-end.
 
+### Also
+
+- **Explorer `search-ms:` paths are resolved.** Opening a folder from a search-results
+  view and copying the address bar yields `search-ms:displayname=…&crumb=location:…`;
+  that used to reach `open()` and die with `OSError 22`. `normalize_container()` decodes
+  the crumb, finds the named folder under it and uses the real path. A container that
+  does not exist is now a one-line error, not a traceback.
+
 ## 2.27.1 — "the button that did nothing" (2026-09-01)
 
 **Setup → Install ReXGlue SDK now actually installs it.** `rexauto`-only; **SDK
