@@ -76,12 +76,59 @@ def _winget(args, emit):
     return p.wait() in (0, -1978335189)  # 0 ok; the latter = 'already installed'
 
 
+def _lay_out_sdk(z, dest_root, emit):
+    """Unzip the SDK into the layout detect_env() looks for:
+
+        <app>/rexglue/sdk/   (bin/ include/ lib/ share/ cmake/ -- the CMake prefix)
+        <app>/rexglue/tool/  (rexglue.exe + rexruntime.dll + TracyClient.dll)
+
+    The release zip is a plain install tree (bin/ at its root); older bundles were
+    wrapped in rexglue/ (+ xenon-jumptables/). Both shapes are accepted -- what must
+    never happen again is dumping bin/ include/ lib/ next to the app, where nothing
+    finds them and the UI keeps saying "not found" after a successful download.
+    """
+    names = [n for n in z.namelist() if not n.endswith("/")]
+    if not names:
+        raise RuntimeError("the SDK archive is empty")
+    top = {n.split("/", 1)[0] for n in names}
+    rex = os.path.join(dest_root, "rexglue")
+    if "rexglue" in top or "xenon-jumptables" in top:
+        # already-wrapped bundle: extract as-is, then make sure tool/ + sdk/ exist
+        z.extractall(dest_root)
+    elif "bin" in top:
+        # raw install tree -> rexglue/sdk, binaries mirrored into rexglue/tool
+        z.extractall(os.path.join(rex, "sdk"))
+    else:
+        raise RuntimeError("unrecognised SDK archive layout (top-level: %s)"
+                           % ", ".join(sorted(top)))
+    sdk = os.path.join(rex, "sdk")
+    tool = os.path.join(rex, "tool")
+    if not os.path.isdir(sdk) and os.path.isdir(os.path.join(rex, "bin")):
+        sdk = rex
+    os.makedirs(tool, exist_ok=True)
+    for fn in ("rexglue.exe", "rexruntime.dll", "TracyClient.dll"):
+        src = os.path.join(sdk, "bin", fn)
+        dst = os.path.join(tool, fn)
+        if os.path.isfile(src) and not os.path.isfile(dst):
+            shutil.copy2(src, dst)
+    exe = os.path.join(tool, "rexglue.exe")
+    if not os.path.isfile(exe):
+        raise RuntimeError("rexglue.exe missing after extraction (looked in %s)" % tool)
+    if not os.path.isdir(os.path.join(sdk, "include")):
+        raise RuntimeError("SDK headers missing after extraction (looked in %s)" % sdk)
+    emit({"type": "setup", "level": "dim", "text": "tool: " + exe})
+    emit({"type": "setup", "level": "dim", "text": "sdk:  " + sdk})
+
+
 def install_rexglue(emit):
     dest_root = app_dir()
     emit({"type": "setup", "level": "info", "text": "downloading ReXGlue SDK…"})
+    emit({"type": "setup", "level": "dim", "text": REXGLUE_URL})
     tmp = os.path.join(tempfile.gettempdir(), "rexglue-sdk-win64.zip")
     try:
-        req = urllib.request.urlopen(REXGLUE_URL, timeout=30)
+        req = urllib.request.urlopen(
+            urllib.request.Request(REXGLUE_URL, headers={"User-Agent": "rexauto-setup"}),
+            timeout=60)
     except Exception as ex:
         emit({"type": "setup", "level": "err", "text": "download failed: %s" % ex})
         emit({"type": "setup", "level": "warn",
@@ -103,18 +150,38 @@ def install_rexglue(emit):
                 emit({"type": "setup", "level": "info", "progress": pct,
                       "text": "downloading… %d%% (%.0f/%.0f MB)"
                       % (pct, got / 1e6, total / 1e6)})
+    if total and got != total:
+        emit({"type": "setup", "level": "err",
+              "text": "download truncated (%d of %d bytes)" % (got, total)})
+        return False
+    if not zipfile.is_zipfile(tmp):
+        emit({"type": "setup", "level": "err",
+              "text": "downloaded file is not a zip (%d bytes) — bad URL or a GitHub error page" % got})
+        return False
     emit({"type": "setup", "level": "info", "text": "extracting…"})
-    # remove a stale copy, then unzip rexglue/ + xenon-jumptables/ next to the app
+    # remove a stale copy, then lay out rexglue/ (+ xenon-jumptables/) next to the app
     for sub in ("rexglue", "xenon-jumptables"):
         p = os.path.join(dest_root, sub)
         if os.path.isdir(p):
             shutil.rmtree(p, ignore_errors=True)
-    with zipfile.ZipFile(tmp) as z:
-        z.extractall(dest_root)
     try:
-        os.remove(tmp)
-    except OSError:
-        pass
+        with zipfile.ZipFile(tmp) as z:
+            _lay_out_sdk(z, dest_root, emit)
+    except Exception as ex:
+        emit({"type": "setup", "level": "err", "text": "extract failed: %s" % ex})
+        return False
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    # the only verdict that matters: does detect_env() see it now?
+    e = _env()
+    if not (e["rexglue"] and e["sdk"]):
+        emit({"type": "setup", "level": "err",
+              "text": "extracted, but detect_env() still can't see the SDK "
+                      "(rexglue=%s, sdk=%s)" % (e["rexglue"], e["sdk"])})
+        return False
     emit({"type": "setup", "level": "good", "text": "ReXGlue SDK installed -> %s\\rexglue" % dest_root})
     return True
 
