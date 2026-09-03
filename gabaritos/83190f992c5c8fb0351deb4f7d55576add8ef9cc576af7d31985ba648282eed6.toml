@@ -1,0 +1,49 @@
+# rexauto gabarito — pre-discovered cures for "gears_of_war_judgment" (37)
+[meta]
+name = "gears_of_war_judgment"
+xex_sha256 = "83190f992c5c8fb0351deb4f7d55576add8ef9cc576af7d31985ba648282eed6"
+cures = 37
+static_closed_pct = 100.0
+static_targets = 499625
+holes = 0
+functions = 59446
+indirect_sites = 45178
+
+[functions]
+"0x822D3688" = {}
+"0x822E1F98" = {}
+"0x823E16A8" = {}
+"0x8245DE40" = {}
+"0x8273F1B0" = {}
+"0x82C073B0" = {}
+"0x82C073D0" = {}
+"0x82C0CC58" = {}
+"0x82C0E020" = {}
+"0x82C12C70" = {}
+"0x82C70DC0" = {}
+"0x82C945F0" = {}
+"0x82CB7DD0" = {}
+"0x82CF9480" = {}
+"0x82CF9540" = {}
+"0x82CF9558" = {}
+"0x82D57808" = {}
+"0x82D68598" = {}
+"0x82DD9C20" = {}
+"0x82E06E90" = {}
+"0x82E380D0" = {}
+"0x82EC6560" = {}
+"0x82EE0E70" = {}
+"0x82EE14B8" = {}
+"0x82F01208" = {}
+"0x82F2ABD0" = {}
+"0x82F2CA38" = {}
+"0x82FAEC20" = {}
+"0x82FAEC28" = {}
+"0x830AFE58" = {}
+"0x830B03E4" = {}
+"0x830B0564" = {}
+"0x830B06E4" = {}
+"0x830B0864" = {}
+"0x830B09E4" = {}
+"0x830B0BB0" = {}
+"0x830B0D7C" = {}

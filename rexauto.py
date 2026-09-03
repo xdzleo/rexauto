@@ -41,6 +41,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+import closure as _closure
 import extract as _extract
 import heal as _heal
 import jt_landings as _jt
@@ -2038,7 +2039,11 @@ def stage_build(ctx):
         if rc == 0 and os.path.exists(ctx.exe):
             write_game_root(ctx)
             ctx.log("build OK -> %s" % ctx.exe)
-            return ctx.mark("build", {"exe": ctx.exe})
+            cl = _closure.measure(ctx.gen)
+            if cl:
+                ctx.log("  " + _closure.summary_line(
+                    cl, cures=len(_heal.load_overrides(ctx.functions))))
+            return ctx.mark("build", {"exe": ctx.exe, "closure": cl})
         if "LLVM ERROR: out of memory" in txt:
             # Giant-module TUs (~2MB generated C++ each + a multi-MB PCH) at the
             # default parallelism (cores+2 = 18 concurrent clangs) can exceed
@@ -2866,10 +2871,21 @@ def publish_gabarito(ctx):
     out_dir = os.path.join(HERE, "gabaritos")
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, key + ".toml")
+    # Carry the closure measurement into the gabarito: a consumer can then see
+    # how much of the title was actually recompiled without rebuilding it, and a
+    # stale cure set is visible as a hole count that no longer matches.
+    cl = _closure.measure(ctx.gen) or {}
+    meta = ""
+    if cl:
+        meta = ("static_closed_pct = %s\nstatic_targets = %d\nholes = %d\n"
+                "functions = %d\nindirect_sites = %d\n"
+                % (cl["static_closed_pct"], cl["static_targets"], cl["holes"],
+                   cl["functions"], cl["indirect_sites"]))
     with open(path, "w", encoding="utf-8") as f:
         f.write('# rexauto gabarito — pre-discovered cures for "%s" (%d)\n'
-                '[meta]\nname = "%s"\nxex_sha256 = "%s"\ncures = %d\n\n%s'
-                % (ctx.name, n, ctx.name, key, n, m.group(0) if m else "[functions]\n"))
+                '[meta]\nname = "%s"\nxex_sha256 = "%s"\ncures = %d\n%s\n%s'
+                % (ctx.name, n, ctx.name, key, n, meta,
+                   m.group(0) if m else "[functions]\n"))
     ctx.log("gabarito: wrote gabaritos/%s.toml (%d cures) — commit it to share" % (key[:12], n))
 
 
