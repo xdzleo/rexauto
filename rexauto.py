@@ -2013,6 +2013,26 @@ def stage_build(ctx):
             skip_codegen = False  # OOM retry: generated/ is already current
         else:
             do_codegen(ctx)
+            # Static pre-heal: every unresolved call/branch trap is a literal
+            # REX_FATAL(...) codegen just wrote into generated/. Cure the whole set
+            # here -- before the first build -- instead of paying one
+            # build+launch+crash per trap in the run-heal, which also only ever
+            # sees the first one the guest reaches. Re-codegen once and re-check;
+            # curing a target can expose another, so loop until it stops shrinking.
+            for _ in range(MAX_BUILD_ATTEMPTS):
+                ub = _heal.unresolved_branches_from_generated(ctx.gen)
+                if not ub:
+                    break
+                nr, ns = _heal.register_or_seed(ub, ctx.functions, ctx.forced, ctx.switches)
+                if not (nr or ns):
+                    ctx.log("  %d unresolved-branch trap(s) in generated/ that this heal "
+                            "cannot cure (first: 0x%X)" % (len(ub), ub[0]))
+                    break
+                _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
+                ctx.log("  static heal: %d unresolved-branch trap(s) in generated/ "
+                        "-> +%d function(s), +%d landing(s); re-running codegen"
+                        % (len(ub), nr, ns))
+                do_codegen(ctx)
         logp, rc = do_build(ctx, bat, attempt=attempt)
         txt = _heal._read_text(logp)
         if rc == 0 and os.path.exists(ctx.exe):

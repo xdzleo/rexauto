@@ -177,13 +177,46 @@ def forced_landings_from_log(build_log):
 
 
 def unresolved_branches_from_runtime(txt):
-    """Targets of runtime 'Unresolved call from X to Y' fatals -- the codegen-baked
-    class where a branch target is neither a discovered function nor a recovered
-    landing, so codegen lowered it to REX_FATAL("Unresolved branch"). The heal loop
-    could never cure it (crash_mind_over_mutant sat through 4 identical runs).
-    Cure = force the target as an in-function landing (never a {} split)."""
+    """Targets of runtime 'Unresolved call/branch from X to Y' fatals -- the
+    codegen-baked class where a branch target is neither a discovered function nor a
+    recovered landing, so codegen lowered it to REX_FATAL. The heal loop could never
+    cure it (crash_mind_over_mutant sat through 4 identical runs).
+    Cure = force the target as an in-function landing (never a {} split).
+
+    codegen emits BOTH wordings -- "Unresolved call" for a bl and "Unresolved
+    branch" for a b/bc. Matching only "call" made this cure dead code for every
+    branch-class fatal: Gears of War Judgment died 0.7s into every launch on
+    "Unresolved branch from 0x830B0F48 to 0x830AFE58" while the loop reported
+    "converged ... (other stop - likely GPU/runtime)"."""
     return sorted({int(m, 16) for m in re.findall(
-        r"Unresolved call from 0x[0-9A-Fa-f]+ to 0x([0-9A-Fa-f]+)", txt)})
+        r"Unresolved (?:call|branch) from 0x[0-9A-Fa-f]+ to 0x([0-9A-Fa-f]+)", txt)})
+
+
+UNRESOLVED_GEN = re.compile(
+    r'REX_FATAL\("Unresolved (?:call|branch) from 0x([0-9A-Fa-f]+) to 0x([0-9A-Fa-f]+)"')
+
+
+def unresolved_branches_from_generated(gen_dir):
+    """Targets of every unresolved call/branch trap BAKED INTO the generated sources.
+
+    This class is decided at codegen time, not at runtime: rexglue emits a literal
+    REX_FATAL("Unresolved branch from 0x%08X to 0x%08X") into the .cpp wherever a
+    branch target is neither a discovered function nor a recovered landing. The
+    runtime binary carries no such string -- it only executes what codegen wrote.
+
+    So the whole set is knowable from `generated/` right after codegen, with no
+    build, no launch and no crash. Harvesting it only from a runtime log (which is
+    what unresolved_branches_from_runtime does) costs one build+launch+crash per
+    trap and only ever finds the FIRST one the guest happens to reach."""
+    out = set()
+    if not os.path.isdir(gen_dir):
+        return []
+    for fn in sorted(os.listdir(gen_dir)):
+        if not fn.endswith((".cpp", ".h")):
+            continue
+        for m in UNRESOLVED_GEN.finditer(_read_text(os.path.join(gen_dir, fn))):
+            out.add(int(m.group(2), 16))
+    return sorted(out)
 
 
 def load_forced(path):
