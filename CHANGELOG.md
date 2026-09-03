@@ -1,5 +1,74 @@
 # Changelog
 
+## 2.29.0 — "the pass nobody ran" (2026-09-03)
+
+**xenon-jumptables ships inside rexauto, and coverage is measured instead of
+asserted.** `rexauto`-only; **SDK unchanged** (`SDK_PIN` identical to 2.27.0).
+
+### The static pass was there all along and almost nobody ran it
+
+`detect_env()` only found xenon-jumptables as a hand-cloned checkout, so a normal
+install recorded
+
+```
+jumptables   {"skipped": "no-repo"}
+```
+
+and the **entire indirect-jump class** fell through to the play-and-heal loop —
+which finds those targets by launching the game and crashing on them, one launch
+at a time. IDA installed, pipeline stage present, recovery never run.
+
+It is now vendored (`vendor/xenon-jumptables`, BSD-3, 18 files, 133 KB) and
+`--add-data`'d into the frozen exe. `detect_env()` resolves `JT_REPO`, then a copy
+beside the app, then the bundled one under `sys._MEIPASS`, then a root checkout.
+The Setup panel lists it as **bundled** — status only, nothing to install.
+
+On Gears of War: Judgment, 165 s of analysis:
+
+| recovered | |
+|---|---|
+| jump tables | 109 |
+| case targets | 3,142 |
+| functions IDA found that the recompiler's scan missed | 19,194 |
+
+The generated C++ dispatches them as real `switch (ctx.ctr.u32)` blocks instead of
+falling through to the runtime dispatcher.
+
+### Coverage, measured from the emitted C++
+
+`closure.py` reports two numbers, because a port has two unrelated kinds of
+incompleteness and one percentage hides that:
+
+- **static closure** — holes over static targets. A hole is not inferred: codegen
+  bakes `REX_FATAL("Unresolved call/branch from …")` into the `.cpp` at every
+  target it could not resolve, so the numerator is the recompiler's own admission.
+- **indirect surface** — `REX_CALL_INDIRECT_FUNC` sites, which bind only when the
+  guest runs, reported with the share now resolved statically by recovered tables.
+  Never folded into a percentage: its true denominator needs every code path in
+  the game executed, which is exactly why the run-heal exists.
+
+Judgment: `static 100.0000% (0 holes / 499,631 targets), 59,446 functions, 45,178
+indirect sites of which 1,871 targets resolved by 115 jump tables`.
+
+`stage_build` logs it and stores it in the checkpoint; `publish_gabarito` carries
+it into the gabarito `[meta]`, so a consumer sees the coverage without rebuilding.
+
+Nothing here reuses `metrics/CLOSURE.md`: that came from `closure_cert`, which this
+project's own audit records as unable to run on any port, with a coverage predicate
+reducing to `a >= starts[0]` — a zero-width hole window on 27 of 29 titles, so its
+"ZERO static holes" was forced, not earned.
+
+### Judgment's gabarito is reachable again
+
+`gabaritos/83190f99….toml` — 45 cures under the key its `default.xex` actually
+hashes to. The old `34fa4496` entry is keyed to a different dump, so
+`fetch_gabarito()` 404'd and the title always healed from scratch; it carries 14
+cures against this run's 45, consistent with having been published from one of the
+false "converged" verdicts fixed in 2.28.1. Both are kept and indexed.
+
+The port now runs **143–343 s per launch with zero fatals**, against a 0.7 s crash
+before 2.28.1.
+
 ## 2.28.1 — "the cure that never ran" (2026-09-03)
 
 **The unresolved-branch heal was dead code, and it never needed a launch anyway.**
