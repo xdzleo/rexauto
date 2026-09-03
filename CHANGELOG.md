@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.28.1 — "the cure that never ran" (2026-09-03)
+
+**The unresolved-branch heal was dead code, and it never needed a launch anyway.**
+`rexauto`-only; **SDK unchanged** (`rexglue-sdk-win64.zip` and `SDK_PIN` identical
+to 2.27.0).
+
+### The crash
+
+A fresh Gears of War: Judgment port built clean and then died 0.7 s into **every**
+launch:
+
+```
+[FATAL] Unresolved branch from 0x830B0F48 to 0x830AFE58
+```
+
+Four run-heal iterations, four identical logs, and each one ended with
+
+```
+run-heal converged in 3 launch(es): exited without an invalid-function fatal
+(other stop - likely GPU/runtime)
+```
+
+A false pass: the loop cured nothing, changed nothing between launches, and
+reported convergence on a title that never reached its title screen.
+
+### Defect 1 — the wrong word
+
+`rexglue` emits **both** wordings, `Unresolved call` for a `bl` and `Unresolved
+branch` for a `b`/`bc`. `unresolved_branches_from_runtime()` matched only `call`.
+Against Judgment's own log the old pattern finds **0** targets; the fixed one finds
+`0x830AFE58`. Since the loop otherwise heals only the invalid-function class, the
+entire branch class was uncurable — `crash_mind_over_mutant`'s four identical runs
+are the same signature.
+
+With the pattern fixed the loop registers `0x830AFE58` on its first iteration and
+Judgment goes from a 0.7 s crash to **107 s launches** discovering ordinary
+indirect-call functions.
+
+### Defect 2 — it was never a runtime question
+
+The trap is a literal `REX_FATAL("Unresolved branch from 0x%08X to 0x%08X")` that
+**codegen bakes into the .cpp**. `rexruntime.dll` carries no such string; it only
+executes what was written. So the whole set is knowable from `generated/` the moment
+codegen finishes.
+
+`unresolved_branches_from_generated()` reads it there, and `stage_build` cures every
+trap and re-runs codegen **before the first build** — instead of paying one
+build + launch + crash per trap, and only ever finding the first one the guest
+happens to reach. Traps that a cure exposes are picked up by the same loop.
+
+The scanner returns both classes from a generated tree, `[]` for a missing directory,
+and `[]` for an already-cured port.
+
+### Also
+
+`gabaritos/README.md` is regenerated from the files it indexes. It had dropped four
+entries (`gears_of_war_judgment`, `gears_of_war_3`, `budokai3`,
+`wwe_smackdown_vs_raw_2007`), listed `skate3` at 32 cures when the file holds 1789,
+and listed `captain_america_super_soldier` as "game" with 1 cure instead of 218.
+
+### Known, named, not fixed
+
+**The Judgment gabarito is unreachable.** `gabaritos/34fa4496….toml` is keyed to a
+`default.xex` whose sha256 is not the one the game ships:
+`83190f99…`. `fetch_gabarito()` therefore 404s and the title always heals from
+scratch. The cure set inside it is right for this binary — its boundary extension
+`0x830AFE28 → 0x830B0F80` is exactly what resolves the fatal above — it simply can
+never be fetched. Re-keying it needs a converged run to publish, which is not in
+this release.
+
 ## 2.28.0 — "forty-four fragments" (2026-09-01)
 
 **Games on Demand containers work, multi-part included.** `rexauto`-only; **SDK
