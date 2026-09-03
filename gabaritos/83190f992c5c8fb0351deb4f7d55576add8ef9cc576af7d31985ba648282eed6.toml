@@ -3,11 +3,16 @@
 name = "gears_of_war_judgment"
 xex_sha256 = "83190f992c5c8fb0351deb4f7d55576add8ef9cc576af7d31985ba648282eed6"
 cures = 45
+byte_coverage_pct = 99.4313
+covered_bytes = 14716980
+code_bytes = 14801148
 static_closed_pct = 100.0
-static_targets = 499645
+static_targets = 499649
 holes = 0
 functions = 59453
 indirect_sites = 45178
+switch_tables = 115
+switch_cases = 1871
 
 [functions]
 "0x822D3688" = {}

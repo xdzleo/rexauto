@@ -2887,10 +2887,12 @@ def publish_gabarito(ctx):
     cl = _closure.measure(ctx.gen) or {}
     meta = ""
     if cl:
-        meta = ("static_closed_pct = %s\nstatic_targets = %d\nholes = %d\n"
+        meta = ("byte_coverage_pct = %s\ncovered_bytes = %s\ncode_bytes = %s\n"
+                "static_closed_pct = %s\nstatic_targets = %d\nholes = %d\n"
                 "functions = %d\nindirect_sites = %d\n"
                 "switch_tables = %d\nswitch_cases = %d\n"
-                % (cl["static_closed_pct"], cl["static_targets"], cl["holes"],
+                % (cl["byte_coverage_pct"], cl["covered_bytes"], cl["code_bytes"],
+                   cl["static_closed_pct"], cl["static_targets"], cl["holes"],
                    cl["functions"], cl["indirect_sites"],
                    cl["switch_tables"], cl["switch_cases"]))
     with open(path, "w", encoding="utf-8") as f:

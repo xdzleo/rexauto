@@ -2,8 +2,22 @@
 closure.py — how much of a title is actually recompiled, measured from the
 emitted C++ instead of asserted.
 
-Two numbers, because a port has two very different kinds of incompleteness and
-collapsing them into one figure is how you get a percentage that flatters:
+The headline is BYTE COVERAGE, which is the convention the decomp community
+settled on (decomp.dev / frogress report "matched bytes / total code bytes" and
+call it the honest metric). Their reason applies here unchanged: counting
+*functions* flatters the result, because the easy ones are small and the hard
+ones are big -- on their data an average matched function is 46 bytes against
+986 for an unmatched one. So this reports the share of the image's code range
+that has emitted C++ behind it, weighted by bytes, not by symbol count.
+
+Covered bytes come from the emitted instruction stream: codegen writes one
+`// <mnemonic ...>` comment per translated PowerPC instruction, and every
+instruction is 4 bytes, so 4x the comment count is exactly the code it
+translated. The denominator is REX_CODE_SIZE from the generated header.
+
+Two further numbers, because a port has two very different kinds of
+incompleteness and collapsing them into one figure is how you get a percentage
+that flatters:
 
   static closure   Every control target the recompiler could derive statically.
                    A HOLE is one it could not resolve, and it says so itself:
@@ -42,6 +56,10 @@ CALL = re.compile(r"\bsub_[0-9A-Fa-f]{8}\(")
 INDIRECT = re.compile(r"\bREX_CALL_INDIRECT_FUNC\b")
 SWITCH = re.compile(r"\bswitch \(ctx\.")
 CASE = re.compile(r"\bcase 0x[0-9A-Fa-f]+:")
+# one per translated PowerPC instruction: "\t// lwz r11,0(r3)"
+INSTR = re.compile(r"^[ \t]+// [a-z][a-z0-9._]*", re.M)
+CODE_SIZE = re.compile(r"#define REX_CODE_SIZE 0x([0-9A-Fa-f]+)")
+CODE_BASE = re.compile(r"#define REX_CODE_BASE 0x([0-9A-Fa-f]+)")
 
 
 def measure(gen_dir):
@@ -49,8 +67,9 @@ def measure(gen_dir):
     when there is nothing to divide by (no sources / empty codegen) rather than
     a fabricated 100."""
     m = {"functions": 0, "landings": 0, "direct_calls": 0, "indirect_sites": 0,
-         "switch_tables": 0, "switch_cases": 0,
+         "switch_tables": 0, "switch_cases": 0, "instructions": 0,
          "holes": 0, "hole_targets": [], "files": 0}
+    code_base = code_size = None
     if not os.path.isdir(gen_dir):
         return None
     for fn in sorted(os.listdir(gen_dir)):
@@ -69,12 +88,27 @@ def measure(gen_dir):
         m["indirect_sites"] += len(INDIRECT.findall(txt))
         m["switch_tables"] += len(SWITCH.findall(txt))
         m["switch_cases"] += len(CASE.findall(txt))
+        m["instructions"] += len(INSTR.findall(txt))
+        if code_size is None:
+            mm, mb = CODE_SIZE.search(txt), CODE_BASE.search(txt)
+            if mm:
+                code_size = int(mm.group(1), 16)
+            if mb:
+                code_base = int(mb.group(1), 16)
         for t in TRAP.finditer(txt):
             m["holes"] += 1
             m["hole_targets"].append(int(t.group(2), 16))
     if not m["files"]:
         return None
     m["hole_targets"] = sorted(set(m["hole_targets"]))
+    # byte coverage -- the headline. 4 bytes per translated instruction over the
+    # image's code range. None (not 100) when the header did not carry the range.
+    m["code_base"] = code_base
+    m["code_bytes"] = code_size
+    m["covered_bytes"] = 4 * m["instructions"]
+    m["byte_coverage_pct"] = (round(100.0 * m["covered_bytes"] / code_size, 4)
+                              if code_size else None)
+    m["uncovered_bytes"] = (code_size - m["covered_bytes"]) if code_size else None
     m["static_targets"] = m["landings"] + m["direct_calls"] + m["holes"]
     m["static_closed_pct"] = (round(100.0 * (m["static_targets"] - m["holes"])
                                     / m["static_targets"], 4)
@@ -89,7 +123,11 @@ def summary_line(m, cures=None):
     if not m:
         return "closure: generated/ not measurable"
     pct = "n/a" if m["static_closed_pct"] is None else "%.4f%%" % m["static_closed_pct"]
-    s = ("closure: static %s (%d hole(s) / %s static targets), %s functions, "
+    byt = ("recompiled: %.4f%% by code bytes (%s / %s), "
+           % (m["byte_coverage_pct"], "{:,}".format(m["covered_bytes"]),
+              "{:,}".format(m["code_bytes"]))) if m["byte_coverage_pct"] is not None \
+        else "recompiled: n/a by code bytes, "
+    s = (byt + "static closure %s (%d hole(s) / %s static targets), %s functions, "
          "%s indirect dispatch site(s) of which %s target(s) are resolved "
          "statically by %d recovered jump table(s)"
          % (pct, m["holes"], "{:,}".format(m["static_targets"]),
