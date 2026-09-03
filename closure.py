@@ -40,6 +40,8 @@ DEFN = re.compile(r"DEFINE_REX_FUNC\(sub_[0-9A-Fa-f]+\)")
 LAND = re.compile(r"goto loc_[0-9A-Fa-f]+")
 CALL = re.compile(r"\bsub_[0-9A-Fa-f]{8}\(")
 INDIRECT = re.compile(r"\bREX_CALL_INDIRECT_FUNC\b")
+SWITCH = re.compile(r"\bswitch \(ctx\.")
+CASE = re.compile(r"\bcase 0x[0-9A-Fa-f]+:")
 
 
 def measure(gen_dir):
@@ -47,6 +49,7 @@ def measure(gen_dir):
     when there is nothing to divide by (no sources / empty codegen) rather than
     a fabricated 100."""
     m = {"functions": 0, "landings": 0, "direct_calls": 0, "indirect_sites": 0,
+         "switch_tables": 0, "switch_cases": 0,
          "holes": 0, "hole_targets": [], "files": 0}
     if not os.path.isdir(gen_dir):
         return None
@@ -64,6 +67,8 @@ def measure(gen_dir):
         m["landings"] += len(LAND.findall(txt))
         m["direct_calls"] += len(CALL.findall(txt))
         m["indirect_sites"] += len(INDIRECT.findall(txt))
+        m["switch_tables"] += len(SWITCH.findall(txt))
+        m["switch_cases"] += len(CASE.findall(txt))
         for t in TRAP.finditer(txt):
             m["holes"] += 1
             m["hole_targets"].append(int(t.group(2), 16))
@@ -85,9 +90,11 @@ def summary_line(m, cures=None):
         return "closure: generated/ not measurable"
     pct = "n/a" if m["static_closed_pct"] is None else "%.4f%%" % m["static_closed_pct"]
     s = ("closure: static %s (%d hole(s) / %s static targets), %s functions, "
-         "%s indirect dispatch site(s)"
+         "%s indirect dispatch site(s) of which %s target(s) are resolved "
+         "statically by %d recovered jump table(s)"
          % (pct, m["holes"], "{:,}".format(m["static_targets"]),
-            "{:,}".format(m["functions"]), "{:,}".format(m["indirect_sites"])))
+            "{:,}".format(m["functions"]), "{:,}".format(m["indirect_sites"]),
+            "{:,}".format(m["switch_cases"]), m["switch_tables"]))
     if cures is not None:
         s += ", %d runtime cure(s) registered" % cures
     return s

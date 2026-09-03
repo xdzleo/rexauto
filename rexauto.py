@@ -92,8 +92,18 @@ def detect_env():
         "rexglue": e("REXGLUE") or near("rexglue/tool/rexglue.exe") or shutil.which("rexglue")
         or newest_glob(r"C:\Skate3\rexglue-sdk\out\win-amd64\*\rexglue.exe",
                        r"C:\Skate3Recomp\rexglue-sdk\out\win-amd64\*\rexglue.exe"),
+        # xenon-jumptables ships INSIDE rexauto (vendor/, --add-data'd into the
+        # frozen exe and unpacked to sys._MEIPASS). It is not optional in
+        # practice: every bctr table it recovers statically is an indirect target
+        # resolved at codegen time instead of the run-heal finding it by launching
+        # the game and crashing on it. It used to have to be cloned by hand, so
+        # the stage recorded {"skipped": "no-repo"} and pushed the whole class
+        # onto the play-and-heal loop. JT_REPO still overrides, for a working copy.
         "jt_repo": e("JT_REPO") or near("xenon-jumptables")
-        or find_first([r"C:\xenon-jumptables"]),
+        or find_first([p for p in (
+            os.path.join(getattr(sys, "_MEIPASS", ""), "xenon-jumptables"),
+            os.path.join(HERE, "vendor", "xenon-jumptables"),
+            r"C:\xenon-jumptables") if p and os.path.basename(p)]),
         # a real python interpreter for the jump-table scripts (sys.executable is
         # the frozen .exe when packaged, which can't run .py files)
         "python": (None if getattr(sys, "frozen", False) else sys.executable)
@@ -2879,8 +2889,10 @@ def publish_gabarito(ctx):
     if cl:
         meta = ("static_closed_pct = %s\nstatic_targets = %d\nholes = %d\n"
                 "functions = %d\nindirect_sites = %d\n"
+                "switch_tables = %d\nswitch_cases = %d\n"
                 % (cl["static_closed_pct"], cl["static_targets"], cl["holes"],
-                   cl["functions"], cl["indirect_sites"]))
+                   cl["functions"], cl["indirect_sites"],
+                   cl["switch_tables"], cl["switch_cases"]))
     with open(path, "w", encoding="utf-8") as f:
         f.write('# rexauto gabarito — pre-discovered cures for "%s" (%d)\n'
                 '[meta]\nname = "%s"\nxex_sha256 = "%s"\ncures = %d\n%s\n%s'

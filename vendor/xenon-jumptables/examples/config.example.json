@@ -1,0 +1,11 @@
+{
+  "image": "game.bin",
+  "image_base": "0x82000000",
+  "image_end": "0x826D0000",
+  "text_start": "0x82080000",
+  "text_end": "0x8230EC00",
+  "functions": "functions.txt",
+  "format": "xenonrecomp",
+  "output": "jumptables.json",
+  "toml": "switch_tables.toml"
+}

@@ -120,7 +120,8 @@ You supply the game. rexauto does not download, decrypt or distribute copyrighte
 pip install pywebview pyinstaller pillow
 python gui/make_icon.py
 pyinstaller --noconfirm --onefile --windowed --name rexauto \
-  --icon gui/rexauto.ico --add-data "gui/index.html;gui" --paths gui \
+  --icon gui/rexauto.ico --add-data "gui/index.html;gui" \
+  --add-data "vendor/xenon-jumptables;xenon-jumptables" --paths gui \
   --hidden-import extract --hidden-import heal --hidden-import rexauto \
   --hidden-import detect_setjmp --hidden-import server --hidden-import setup \
   --collect-all webview app.py

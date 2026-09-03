@@ -52,6 +52,10 @@ def deps_status():
         {"key": "python", "name": "Python", "found": bool(e["python"]),
          "detail": e["python"] or "not found", "action": "python",
          "note": "optional — only for the jump-table stage"},
+        {"key": "jt_repo", "name": "xenon-jumptables", "found": bool(e["jt_repo"]),
+         "detail": e["jt_repo"] or "not found", "action": None,
+         "note": "bundled — static bctr jump-table recovery; each table it resolves "
+                 "is a crash the run-heal doesn't have to find by dying (needs IDA)"},
         {"key": "idat", "name": "IDA Pro", "found": bool(e["idat"]),
          "detail": e["idat"] or "not found", "action": None,
          "note": "optional, commercial — install manually for extra jump tables"},

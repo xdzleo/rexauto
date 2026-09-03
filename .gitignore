@@ -5,7 +5,9 @@ dist/
 *.spec
 *.zip
 rexglue/
-xenon-jumptables/
+# Only a hand-cloned checkout AT THE ROOT is ignored. vendor/xenon-jumptables/
+# is the bundled copy that ships inside rexauto and must stay tracked.
+/xenon-jumptables/
 autoports/
 .rexauto_state
 .claude/
