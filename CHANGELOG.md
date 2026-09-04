@@ -1,5 +1,64 @@
 # Changelog
 
+## 2.34.0 — "a silent pass is worse than a broken one" (2026-09-04)
+
+**Every discovery pass we shipped was dead on ReXGlue v0.10.0, and said nothing.**
+`rexauto`-only; **SDK unchanged** (see the note at the end on why the v0.10.0
+switch is not in this release).
+
+### The passes were reading one filename
+
+`_gap_fill_register` and `_pointer_scan_register` read `REX_CODE_BASE` /
+`REX_CODE_SIZE` from `<name>_init.h`. ReXGlue 0.8.2 puts those defines there;
+**v0.10.0 puts them in `<name>_pch.h`**. The regex raised, a bare `except`
+swallowed it, and both passes returned nothing — with no message.
+
+The cost was not the passes: it was three rounds of investigation blaming the
+newer SDK for functions it was not missing. `_codegen_ranges()` now scans the
+emitted headers for whichever file carries them.
+
+### Cure provenance
+
+The gabarito always ships. It carries what no static pass can reach — on Dante's
+Inferno **27 of 33** missing functions are addresses *already covered* by another
+function, and only a runtime call reveals them as separate entries — and it saves
+the launches.
+
+But a change to the static passes is only an improvement if a run **without** it
+needs fewer runtime cures. `stage_build` records that split:
+
+```json
+"cures": {"pointer_scan": 15, "gap_fill": 1, "total": 636, "gabarito": false}
+```
+
+`runtime` is the number to drive down: exactly what the tool still cannot find by
+reading the binary.
+
+### Log scroll
+
+The pipeline log forced `scrollTop` to the bottom on every line, and the pipeline
+emits several a second — scrolling up to read anything was undone immediately. It
+now follows the tail only while the reader is at the tail. Same for the Setup log.
+
+### Gabaritos
+
+Gears of War Judgment re-published at **728 cures**; Dante's Inferno added at
+**639** — 100% of recompilable code, 0 holes, 36,504 functions. Both are fetched
+automatically by key on a fresh run.
+
+### Why v0.10.0 is not shipped here
+
+It was built (upstream v0.10.0 + our `dump-image` port + a fix for a regression
+in its conditional-branch lowering) and it does match: **60,146 functions vs our
+60,137 on Judgment, 0 holes both**. Two things block shipping it:
+
+- **v0.10.0 moved the GPU into a plugin.** Without `rexgpu-xenos.dll` beside the
+  exe *and* `--gpu_plugin=xenos`, the runtime logs `no GPU emulation loaded
+  (gpu_plugin not set); call ignored` and the port renders nothing. rexauto does
+  neither yet.
+- Switching re-pins `SDK_PIN` and invalidates every title's byte-identical
+  baseline at once.
+
 ## 2.33.0 — "don't start what can't finish" (2026-09-03)
 
 **A run with missing tools now refuses to start, and a run that will silently
