@@ -1,5 +1,40 @@
 # Changelog
 
+## 2.32.1 — "a landing cannot catch a branch from outside" (2026-09-03)
+
+**Fixes a hole 2.32.0's gap fill left behind.** `rexauto`-only; **SDK unchanged**.
+
+On Dante's Inferno the new pass closed 3,116 bytes of uncovered code and left
+**one** unresolved-branch trap it could not cure. `0x829085A4` was in
+`forced_landings`, the file was written, the manifest included it, and codegen
+kept emitting `REX_FATAL("Unresolved branch from 0x829082B0 to 0x829085A4")` on
+every round.
+
+A forced landing emits a `loc_` label **inside** the function that owns the
+address. That is enough only when the branch comes from inside that same routine
+— a branch arriving from a *different* function cannot `goto` into another
+function's body in C++, so the trap survives forever. The unresolved-branch heal
+now cures an in-span target as a **chunk** (`parent = <owner>`): a real
+function-table entry that does not split the owner.
+
+This is the third time the same distinction has bitten: a *called* interior
+address (2.30.0), a data pointer landing on a `loc_` (2.31.0), and now a branch
+from outside. The rule is one line — **a `loc_` label only serves control
+arriving from within the same routine; anything arriving from outside needs an
+entry.**
+
+Dante's Inferno, same 287-cure base and the same corrected ruler throughout:
+
+| | coverage | functions | uncovered | holes |
+|---|---|---|---|---|
+| without gap fill (2.31.0) | 99.8948% | 36,195 | 8,396 B | 0 |
+| with gap fill (2.32.0) | 99.9338% | 36,503 | 5,280 B | **1** |
+| **with this fix** | **99.9338%** | 36,504 | 5,280 B | **0** |
+
+Gears of War Judgment is unchanged and still clean: **99.9601%**, 60,137
+functions, 0 holes. `REXAUTO_NO_GAPFILL=1` disables the pass, which is also how
+the A/B above was measured.
+
 ## 2.32.0 — "measure it exactly, then close what it finds" (2026-09-03)
 
 **The coverage measurement was wrong twice; both are fixed, and the corrected
