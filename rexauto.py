@@ -2109,6 +2109,33 @@ def stage_deepextract(ctx, gen_current=False):
                                     "accepted": len(accepted), "landings": n_land})
 
 
+def _codegen_ranges(ctx):
+    """(image_base, code_base, code_size) from the generated tree, or None.
+
+    Do NOT read only <name>_init.h. ReXGlue 0.8.2 puts these defines there and
+    v0.10.0 puts them in <name>_pch.h, so the hard-coded filename turned both the
+    pointer scan and the gap fill into silent no-ops on the newer SDK -- the
+    regex raised, the except swallowed it, and the pass just returned nothing.
+    Scan the emitted headers for whichever one carries them."""
+    import glob as _glob
+    seen = []
+    for pat in ("%s_init.h" % ctx.name, "%s_pch.h" % ctx.name, "*.h"):
+        for f in sorted(_glob.glob(os.path.join(ctx.gen, pat))):
+            if f in seen:
+                continue
+            seen.append(f)
+            try:
+                h = _heal._read_text(f)
+            except OSError:
+                continue
+            mi = re.search(r"REX_IMAGE_BASE 0x([0-9A-Fa-f]+)", h)
+            mb = re.search(r"REX_CODE_BASE 0x([0-9A-Fa-f]+)", h)
+            ms = re.search(r"REX_CODE_SIZE 0x([0-9A-Fa-f]+)", h)
+            if mi and mb and ms:
+                return (int(mi.group(1), 16), int(mb.group(1), 16), int(ms.group(1), 16))
+    return None
+
+
 def _gap_fill_register(ctx):
     """Register the start of every stretch of the code range that carries
     instructions and has no emitted C++ behind it.
@@ -2127,14 +2154,11 @@ def _gap_fill_register(ctx):
     rounds and 59,761 -> 60,137 functions. Returns the addresses registered."""
     import array
     image = os.path.join(ctx.work, "%s_image.bin" % ctx.name)
-    hdr = os.path.join(ctx.gen, ctx.name + "_init.h")
-    if not (os.path.exists(image) and os.path.exists(hdr)):
+    rng = _codegen_ranges(ctx)
+    if not (os.path.exists(image) and rng):
         return []
+    ib, cb, cs = rng
     try:
-        h = _heal._read_text(hdr)
-        ib = int(re.search(r"REX_IMAGE_BASE 0x([0-9A-Fa-f]+)", h).group(1), 16)
-        cb = int(re.search(r"REX_CODE_BASE 0x([0-9A-Fa-f]+)", h).group(1), 16)
-        cs = int(re.search(r"REX_CODE_SIZE 0x([0-9A-Fa-f]+)", h).group(1), 16)
         with open(image, "rb") as f:
             raw = f.read()
         w = array.array("I")
@@ -2184,16 +2208,10 @@ def _pointer_scan_register(ctx):
     landing as a function is what made Judgment die 0.7s into every launch.
     Returns the addresses newly written to functions.toml."""
     image = os.path.join(ctx.work, "%s_image.bin" % ctx.name)
-    hdr = os.path.join(ctx.gen, ctx.name + "_init.h")
-    if not (os.path.exists(image) and os.path.exists(hdr)):
-        return 0
-    try:
-        h = _heal._read_text(hdr)
-        ib = int(re.search(r"REX_IMAGE_BASE 0x([0-9A-Fa-f]+)", h).group(1), 16)
-        cb = int(re.search(r"REX_CODE_BASE 0x([0-9A-Fa-f]+)", h).group(1), 16)
-        cs = int(re.search(r"REX_CODE_SIZE 0x([0-9A-Fa-f]+)", h).group(1), 16)
-    except Exception:
-        return 0
+    rng = _codegen_ranges(ctx)
+    if not (os.path.exists(image) and rng):
+        return []
+    ib, cb, cs = rng
     new, lab = _heal.data_pointer_scan(image, ctx.gen, ib, cb, cs)
     full = _heal.load_overrides_full(ctx.functions)
     known = set(full)
@@ -2250,6 +2268,8 @@ def stage_build(ctx):
                 if _added:
                     ctx.log("  pointer scan: +%d function(s) found in the image's "
                             "data sections; re-running codegen" % len(_added))
+                    ctx._cure_origin = getattr(ctx, "_cure_origin", {})
+                    ctx._cure_origin["pointer_scan"] =                         ctx._cure_origin.get("pointer_scan", 0) + len(_added)
                     do_codegen(ctx)
                     # Keep only what codegen actually DEFINED. A pointer can land
                     # in a region codegen declines to translate -- the import
@@ -2281,6 +2301,8 @@ def stage_build(ctx):
                         break
                     ctx.log("  gap fill: %d uncovered code range(s) registered; "
                             "re-running codegen" % len(_gaps))
+                    ctx._cure_origin = getattr(ctx, "_cure_origin", {})
+                    ctx._cure_origin["gap_fill"] =                         ctx._cure_origin.get("gap_fill", 0) + len(_gaps)
                     do_codegen(ctx)
                     _def2, _ = _heal._emitted_symbols(ctx.gen)
                     _drop = [a for a in _gaps if a not in _def2]
@@ -2322,6 +2344,8 @@ def stage_build(ctx):
                 ctx.log("  static heal: %d unresolved-branch trap(s) in generated/ "
                         "-> +%d function(s), +%d landing(s); re-running codegen"
                         % (len(ub), nr, ns))
+                ctx._cure_origin = getattr(ctx, "_cure_origin", {})
+                ctx._cure_origin["static_trap"] =                     ctx._cure_origin.get("static_trap", 0) + nr + ns
                 do_codegen(ctx)
         logp, rc = do_build(ctx, bat, attempt=attempt)
         txt = _heal._read_text(logp)
@@ -2332,7 +2356,20 @@ def stage_build(ctx):
             if cl:
                 ctx.log("  " + _closure.summary_line(
                     cl, cures=len(_heal.load_overrides(ctx.functions))))
-            return ctx.mark("build", {"exe": ctx.exe, "closure": cl})
+            # Where each cure came from. The gabarito always ships in production
+            # -- it carries the ones no static pass can reach (Dante's Inferno:
+            # 27 of 33 are addresses already covered by another function, only a
+            # runtime call reveals them as separate entries) and it saves the
+            # launches. But every change to the static passes is measured with
+            # REXAUTO_NO_GABARITO=1, and `runtime` below is the number that has
+            # to fall: it is exactly what the tool still cannot find by reading
+            # the binary. Recorded per build so progress is comparable run over
+            # run instead of remembered.
+            _origin = dict(getattr(ctx, "_cure_origin", {}))
+            _origin["total"] = len(_heal.load_overrides(ctx.functions))
+            _origin["gabarito"] = bool(getattr(ctx, "_seeded_from_gabarito", False))
+            return ctx.mark("build", {"exe": ctx.exe, "closure": cl,
+                                      "cures": _origin})
         if "LLVM ERROR: out of memory" in txt:
             # Giant-module TUs (~2MB generated C++ each + a multi-MB PCH) at the
             # default parallelism (cores+2 = 18 concurrent clangs) can exceed
@@ -2892,6 +2929,10 @@ def stage_runheal(ctx):
             if n_seed:
                 _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
             n = n_reg + n_seed
+            # the number the static passes have to drive down: cures that only a
+            # launch could reveal (see the `cures` block in stage_build)
+            ctx._cure_origin = getattr(ctx, "_cure_origin", {})
+            ctx._cure_origin["runtime"] = ctx._cure_origin.get("runtime", 0) + n
             ctx.log("heal round %d: target(s) @ %s -> +%d (%d fn, %d landing); rebuilding"
                     % (it, ",".join("0x%X" % a for a in addrs), n, n_reg, n_seed))
         # Targets owned by an extra module: cure in ITS functions.toml and re-codegen
@@ -3144,6 +3185,7 @@ def fetch_gabarito(ctx):
         f.write(body)
     ctx.log("gabarito: seeded %d known cures from the shared database (xex %s…) -> "
             "auto-heal short or skipped" % (n, key[:12]))
+    ctx._seeded_from_gabarito = True
     return n
 
 

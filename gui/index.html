@@ -429,8 +429,16 @@ function addLog(level,text){
   const cur=document.createElement('div'); cur.className='ln dim';
   cur.innerHTML='<span class="tx"><span class="cursor"></span></span>'; logbody.appendChild(cur);
   lc++; document.getElementById('logcnt').textContent=lc+' lines';
-  logbody.scrollTop=logbody.scrollHeight;
+  if(stick) logbody.scrollTop=logbody.scrollHeight;
 }
+/* Follow the tail only while the reader is AT the tail. Scrolling up used to be
+   undone by the very next log line (the pipeline emits several per second), so
+   reading anything that had scrolled past was impossible. 24px of slack absorbs
+   sub-pixel/zoom rounding. */
+let stick=true;
+logbody.addEventListener('scroll',()=>{
+  stick = logbody.scrollHeight - logbody.scrollTop - logbody.clientHeight < 24;
+});
 function setHeadline(t){document.getElementById('headline').textContent=t;}
 function setStatus(txt,color){document.getElementById('statustxt').textContent=txt;
   if(color)document.getElementById('statusdot').style.background=color;}
@@ -525,8 +533,10 @@ async function install(target){
 }
 document.getElementById('installall').onclick=()=>install('all');
 function addSetup(level,text){const el=document.getElementById('setuplog');
+  // same rule as the pipeline log: follow the tail only while the reader is at it
+  const atEnd = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
   const d=document.createElement('div'); d.className='sl '+(level||'info'); d.textContent=text;
-  el.appendChild(d); el.scrollTop=el.scrollHeight;}
+  el.appendChild(d); if(atEnd) el.scrollTop=el.scrollHeight;}
 function onSetupEvent(m){
   if(m.text)addSetup(m.level,m.text);
   if(typeof m.progress==='number'){document.getElementById('sprogi').style.width=m.progress+'%';}

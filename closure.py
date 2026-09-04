@@ -170,6 +170,10 @@ def measure(gen_dir, image_path=None, image_base=None):
     # never be covered. On Gears of War Judgment that is 112,820 bytes -- charging
     # it against the port understates the result by three quarters of a point.
     m["padding_bytes"] = None
+    m["thunk_bytes"] = None
+    m["data_bytes"] = None
+    m["uncovered_code_bytes"] = None
+    m["code_gaps"] = []
     m["code_coverage_pct"] = None
     if image_path and code_size and os.path.exists(image_path):
         try:
@@ -192,14 +196,37 @@ def measure(gen_dir, image_path=None, image_base=None):
                 pos = max(pos, en)
             if pos < hi:
                 gaps.append((pos, hi))
-            pad = 0
+            # Classify what is NOT covered. Only one class is a real miss.
+            #   padding  alignment between functions: 0x00000000 / `nop`
+            #   thunks   the import thunk table: two data words then mtctr/bctr,
+            #            resolved by the runtime and never recompiled
+            #   data     a table whose every word is zero or an in-image pointer
+            #            (Gears of War Judgment has 21 of these, 12 bytes each,
+            #            shaped `00000000 <ptr> <ptr>` between functions)
+            #   code     anything else -- the only thing worth chasing
+            img_end = ib + len(w) * 4
+            pad = thunk = data = 0
+            m["code_gaps"] = []
             for st, en in gaps:
-                if all(_word(a) in (0, 0x60000000, None) for a in range(st, en, 4)):
+                ws = [_word(a) for a in range(st, en, 4)]
+                if all(x in (0, 0x60000000, None) for x in ws):
                     pad += en - st
+                elif any(x == 0x7D6903A6 for x in ws) and any(x == 0x4E800420
+                                                              for x in ws):
+                    thunk += en - st
+                elif all(x == 0 or (ib <= (x or 0) < img_end) for x in ws):
+                    data += en - st
+                else:
+                    m["code_gaps"].append((st, en))
             m["padding_bytes"] = pad
-            real = code_size - pad
-            if real > 0:
-                m["code_coverage_pct"] = round(100.0 * m["covered_bytes"] / real, 4)
+            m["thunk_bytes"] = thunk
+            m["data_bytes"] = data
+            m["uncovered_code_bytes"] = sum(e - s for s, e in m["code_gaps"])
+            noncode = pad + thunk + data
+            recompilable = code_size - noncode
+            m["recompilable_bytes"] = recompilable
+            m["code_coverage_pct"] = (round(100.0 * m["covered_bytes"] / recompilable, 4)
+                                      if recompilable > 0 else None)
         except Exception:
             pass
     m["static_targets"] = m["landings"] + m["direct_calls"] + m["holes"]
