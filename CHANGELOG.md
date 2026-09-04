@@ -1,5 +1,91 @@
 # Changelog
 
+## 2.31.0 — "a port shouldn't die on a function nobody found" (2026-09-03)
+
+**Ports ship tolerant of undiscovered functions, the pointer scan stops throwing
+most of its findings away, and two SDK miscompilations are repaired in the emitted
+C++.** `rexauto`-only; **SDK unchanged** (`SDK_PIN` identical to 2.27.0).
+
+Everything here came from building
+[hells-gate-recomp](https://github.com/florinp93/hells-gate-recomp)'s patched
+ReXGlue **v0.10.0** and running it against *our own* Dante's Inferno — same game,
+same pipeline, one variable.
+
+### The difference between "dies at 20 s" and "reaches gameplay" is three lines
+
+An indirect call to an address the static scan never found is `REX_FATAL`: the
+process dies, and the run-heal has to find every such address by launching and
+crashing on it. Their patch replaces that with a log-and-return, and says why:
+*"many indirect call targets are runtime-computed vtable entries that static
+analysis cannot discover."*
+
+Our 0.8.2 runtime **already has that behaviour**, behind `REX_HEAL_DISCOVER`, used
+only while healing. Same exe, same build of Dante's Inferno:
+
+| dispatcher | result |
+|---|---|
+| strict (the shipped default) | dies at 20 s on `0x82908134` |
+| tolerant | **120 s, zero fatals** |
+
+The build now writes `play <name>.cmd` beside the exe, which sets it. The `.exe`
+keeps the strict default, because the heal needs a launch that stops at the first
+missing function in order to find it. The two modes exist for opposite reasons and
+until now only the healer's one was ever shipped. `REXAUTO_NO_PLAY_LAUNCHER=1`
+skips writing it.
+
+### The pointer scan was discarding most of what it found
+
+v0.10.0 discovers **51 functions on Dante's Inferno that we did not have**, and 40
+of them are plain pointers in the image data. Ours found those and dropped them,
+because the target was already emitted as a `loc_` label inside another function
+and registering it as a function would split the owner.
+
+Neither ignoring nor registering was right: they are cured as **chunks**.
+`label_owners()` reads which `DEFINE_REX_FUNC` precedes each `loc_`, and the scan
+returns those hits with their owner, so each becomes `{ parent = <owner> }` — a
+real function-table entry that leaves the owner whole. Same lesson as 2.30.0's
+call-vs-branch fix, applied to discovery instead of healing.
+
+| Dante's Inferno | by code bytes | functions |
+|---|---|---|
+| before | 99.6947% | 36,155 |
+| importing their 51 by hand | 99.7160% | 36,204 |
+| **finding them ourselves** | **99.7279%** | 36,195 |
+
+Gears of War Judgment, which already had zero static holes, gains the same way:
+**99.6582% → 99.6820%**, 59,726 → 59,761 functions.
+
+### Two SDK miscompilations, repaired in the emitted C++
+
+- **`vpkuwus`/`vpkuhus` in-place aliasing.** The pack writes the destination's
+  narrow element array while still reading a source's wide one; same 128-bit
+  storage, so `vpkuwus128 v63,v61,v63` corrupts its own next read. Sources are
+  snapshotted first. Confirmed independently: v0.10.0 fixes it with intrinsics
+  that load both sources before the single store.
+- **`lvebx`/`lvehx`/`lvewx` are NOT a bug.** They are lowered as a full 16-byte
+  `lvx`, which looks wrong and is not: v0.10.0 ships element-load builders and
+  deliberately leaves them undispatched — *"the Xbox 360 Xenon CPU does not
+  implement the standard AltiVec element-load semantics for these instructions."*
+  An earlier attempt to "fix" this was a regression, caught by running their
+  codegen over the same title, and is reverted. `REXAUTO_NO_VPACK_FIX=1` disables
+  the repair that remains.
+
+### Also
+
+- `xenon-jumptables` ships inside rexauto (`vendor/`), `--add-data`'d into the exe.
+  It used to need a hand clone, so `jumptables` recorded `{"skipped": "no-repo"}`
+  and the whole indirect-jump class fell to the play-and-heal loop. Judgment: 109
+  tables, 3,142 case targets, 19,194 functions IDA found that the scan had missed.
+- `closure.py` reports **byte coverage** as the headline, the way decomp.dev and
+  frogress do (matched bytes over total code bytes), because counting functions
+  flatters: the easy ones are small and the hard ones are big.
+- Four of our own bugs, all found by running the pipeline on a second title: a
+  called interior address cured as a forced landing (a `loc_` label can never
+  satisfy a call, so the heal looped forever on Dante `0x829083F0`); a landing
+  emitted once per parent, whose duplicate TOML key made rexglue reject the entire
+  config; a forced-landings include declared for a file that was never written;
+  and Explorer `search-ms:` paths reaching `open()`.
+
 ## 2.30.0 — "the pointers were in the file all along" (2026-09-03)
 
 **The recompiler now finds the function pointers sitting in the game's data, and
