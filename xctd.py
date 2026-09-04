@@ -27,10 +27,36 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAGIC = b"\x0f\xf5\x12\xed"
 
-TOOL_SRC = [os.path.join(HERE, "tools", "xctd_rip.cpp"),
-            os.path.join(HERE, "thirdparty", "libmspack", "lzxd.c"),
-            os.path.join(HERE, "thirdparty", "libmspack", "system.c")]
-TOOL_EXE = os.path.join(HERE, "tools", "xctd_rip.exe")
+def _src_root():
+    """Where the decoder's sources live. In a PyInstaller build they are unpacked
+    under sys._MEIPASS, not beside the .exe -- without this the frozen build died
+    with "no such file or directory: ...\\thirdparty\\libmspack\\lzxd.c", which is
+    to say the xctd stage had never once worked outside a source checkout."""
+    return getattr(sys, "_MEIPASS", None) or HERE
+
+
+def _build_root():
+    """Where the built decoder is cached. NOT _MEIPASS: that directory is deleted
+    when the process exits, so the "one-time" build would run on every launch and
+    the .o files would be written into a tree that is gone next time. A frozen
+    build caches under %LOCALAPPDATA%\\rexauto; a source checkout keeps using
+    tools/ as before."""
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "rexauto", "xctd")
+    else:
+        d = os.path.join(HERE, "tools")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+TOOL_SRC = [os.path.join(_src_root(), "tools", "xctd_rip.cpp"),
+            os.path.join(_src_root(), "thirdparty", "libmspack", "lzxd.c"),
+            os.path.join(_src_root(), "thirdparty", "libmspack", "system.c")]
+TOOL_EXE = os.path.join(_build_root(), "xctd_rip.exe")
 
 
 def ensure_tool(env, log=print):
@@ -42,10 +68,18 @@ def ensure_tool(env, log=print):
     clangxx = env.get("clangxx") or env.get("clang")
     if not clangxx:
         raise SystemExit("xctd: clang++ not found (needed to build the XCTD decoder)")
-    inc = os.path.join(HERE, "thirdparty", "libmspack")
+    inc = os.path.join(_src_root(), "thirdparty", "libmspack")
     cpp, c1, c2 = TOOL_SRC
-    o1 = os.path.join(HERE, "thirdparty", "libmspack", "lzxd.o")
-    o2 = os.path.join(HERE, "thirdparty", "libmspack", "system.o")
+    missing = [s for s in TOOL_SRC if not os.path.exists(s)]
+    if missing:
+        raise SystemExit(
+            "xctd: decoder sources missing from this build (%s).\n"
+            "      A packaged rexauto must bundle thirdparty/libmspack and tools/ "
+            "-- see the PyInstaller line in README.md." % ", ".join(missing))
+    # objects go beside the cached exe, never into the read-only/temporary
+    # source tree a frozen build unpacks
+    o1 = os.path.join(_build_root(), "lzxd.o")
+    o2 = os.path.join(_build_root(), "system.o")
     clang = clangxx.replace("clang++", "clang")
     log("xctd: building decoder (one-time)")
     for src, obj in ((c1, o1), (c2, o2)):

@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.32.2 — "the xctd decoder was never in the build" (2026-09-03)
+
+**The XCTD stage has never worked in a packaged rexauto.** `rexauto`-only; **SDK
+unchanged**.
+
+Bully - Scholarship Edition stopped one stage in:
+
+```
+xctd: building decoder (one-time)
+clang: error: no such file or directory:
+  ...\_MEI000073942\thirdparty\libmspack\lzxd.c
+```
+
+The stage compiles `tools/xctd_rip.cpp` against the vendored libmspack to decode
+assets a title ships transparently compressed on disc. The PyInstaller line never
+bundled `thirdparty/libmspack` or `tools/`, so in a frozen build those sources are
+simply not there. It has been broken for as long as there have been releases and
+only shows on a title that uses the format — Gears of War Judgment and Dante's
+Inferno do not, which is why it never surfaced.
+
+Reading the code to fix that turned up a second defect: the decoder was built
+**into** the directory PyInstaller unpacks and deletes on exit. What the code
+calls a one-time build would have run on every launch, writing its `.o` files
+into a tree that is gone next time. A frozen build now caches under
+`%LOCALAPPDATA%\rexauto\xctd`; a source checkout still uses `tools/`.
+
+Missing sources now produce a sentence saying what is wrong instead of leaking a
+clang error.
+
+Verified end-to-end through the packaged exe with the decoder cache deleted first,
+so the compile ran from scratch: **950.6 MB → 1,996.9 MB** plaintext, originals
+preserved under `<work>/<name>/xctd_originals`.
+
+Note the stage rewrites the game folder **in place** (that is its job); the
+originals are kept.
+
 ## 2.32.1 — "a landing cannot catch a branch from outside" (2026-09-03)
 
 **Fixes a hole 2.32.0's gap fill left behind.** `rexauto`-only; **SDK unchanged**.

@@ -15,3 +15,6 @@ covers/
 cache/
 tools/xctd_rip.exe
 thirdparty/libmspack/*.o
+# the xctd decoder is now built beside its cache, not into the source tree
+tools/*.o
+tools/xctd_rip.exe

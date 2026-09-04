@@ -121,8 +121,12 @@ pip install pywebview pyinstaller pillow
 python gui/make_icon.py
 pyinstaller --noconfirm --onefile --windowed --name rexauto \
   --icon gui/rexauto.ico --add-data "gui/index.html;gui" \
-  --add-data "vendor/xenon-jumptables;xenon-jumptables" --paths gui \
-  --hidden-import extract --hidden-import heal --hidden-import rexauto \
+  --add-data "vendor/xenon-jumptables;xenon-jumptables" \
+  --add-data "thirdparty/libmspack;thirdparty/libmspack" --add-data "tools;tools" \
+  --paths gui \
+  --hidden-import extract --hidden-import heal --hidden-import closure \
+  --hidden-import codegen_patches --hidden-import jt_landings \
+  --hidden-import rexauto --hidden-import xctd \
   --hidden-import detect_setjmp --hidden-import server --hidden-import setup \
   --collect-all webview app.py
 ```
