@@ -2226,7 +2226,7 @@ def stage_build(ctx):
                 # instructions and still has no C++ behind it. Runs after the
                 # pointer scan so it only ever sees what that could not reach,
                 # and loops because closing one gap exposes the next.
-                for _round in range(6):
+                for _round in range(0 if os.environ.get("REXAUTO_NO_GAPFILL") else 6):
                     _gaps = _gap_fill_register(ctx)
                     if not _gaps:
                         break
@@ -2254,7 +2254,17 @@ def stage_build(ctx):
                 ub = _heal.unresolved_branches_from_generated(ctx.gen)
                 if not ub:
                     break
-                nr, ns = _heal.register_or_seed(ub, ctx.functions, ctx.forced, ctx.switches)
+                # called=True: cure an in-span target as a CHUNK, not a forced
+                # landing. A landing is only enough when the branch comes from
+                # inside the same routine -- it emits a `loc_` label, and a branch
+                # arriving from a DIFFERENT function cannot goto into another
+                # function's body, so the trap survives. Dante's Inferno
+                # 0x829085A4 sat in forced_landings, with the file written and the
+                # manifest including it, and codegen kept emitting
+                # REX_FATAL("Unresolved branch from 0x829082B0 ...") anyway. A
+                # chunk gives the target a real entry without splitting its owner.
+                nr, ns = _heal.register_or_seed(ub, ctx.functions, ctx.forced,
+                                                ctx.switches, called=True)
                 if not (nr or ns):
                     ctx.log("  %d unresolved-branch trap(s) in generated/ that this heal "
                             "cannot cure (first: 0x%X)" % (len(ub), ub[0]))
