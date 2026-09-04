@@ -21,11 +21,11 @@ Uso:
     python gamepatches.py list <port_dir>            # relatorio
     python gamepatches.py apply <port_dir> <nome>... # gera o _guest_patches.toml
 """
+import glob
 import json
 import os
 import re
 import struct
-import tomllib
 import sys
 import urllib.request
 
@@ -34,7 +34,16 @@ RAW_BASE = "https://raw.githubusercontent.com/xenia-canary/game-patches/main/pat
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "gamepatches")
 
 # larguras suportadas pelo formato da comunidade -> bytes
-WIDTHS = {"be8": 1, "be16": 2, "be32": 4, "be64": 8}
+WIDTHS = {"be8": 1, "be16": 2, "be32": 4, "be64": 8, "f32": 4, "f64": 8}
+# as que carregam ponto flutuante: o "value" e um double no TOML, nao inteiro
+FLOATS = {"f32": ">f", "f64": ">d"}
+
+
+def _pack(kind, value):
+    """Bytes big-endian de uma escrita, do jeito que aparecem na imagem."""
+    if kind in FLOATS:
+        return struct.pack(FLOATS[kind], float(value))
+    return int(value).to_bytes(WIDTHS[kind], "big")
 
 
 # --------------------------------------------------------------------------
@@ -66,28 +75,47 @@ def _module_info(port_dir, man_path):
     gamelogic dentro de default.
     """
     name = os.path.basename(man_path)[: -len("_manifest.toml")]
+    # Le os campos do manifesto com regex em vez de um parser TOML: o tomllib so
+    # existe no Python 3.11+, e o rexauto e congelado a partir do 3.10 --
+    # importa-lo aqui deixava o modulo inteiro inalcancavel nesta maquina.
     try:
-        d = tomllib.load(open(man_path, "rb"))
+        man_txt = open(man_path, encoding="utf-8", errors="ignore").read()
     except Exception:
         return None
-    ep = d.get("entrypoint", {}) or {}
-    out_dir = ep.get("out_directory_path") or ("generated/" + name)
-    init_h = os.path.join(port_dir, *out_dir.split("/"), name + "_init.h")
-    if not os.path.exists(init_h):
-        return None
-    txt = open(init_h, encoding="utf-8", errors="ignore").read()
 
-    def g(key):
-        m = re.search(key + r"\s+0x([0-9A-Fa-f]+)", txt)
-        return int(m.group(1), 16) if m else None
+    def field(key):
+        m = re.search(key + r'\s*=\s*"([^"]*)"', man_txt)
+        return m.group(1) if m else None
 
-    cb, cs, ib = g("REX_CODE_BASE"), g("REX_CODE_SIZE"), g("REX_IMAGE_BASE")
+    out_dir = field("out_directory_path") or ("generated/" + name)
+    # Os defines nao estao sempre no mesmo header: a ReXGlue 0.8.2 os poe em
+    # <name>_init.h e a v0.10.0 em <name>_pch.h. Fixar um nome so fazia este
+    # modulo desistir calado ("nenhum modulo utilizavel") em todo port gerado
+    # pelo SDK novo. Mesma ordem de busca de rexauto._codegen_ranges.
+    gen_dir = os.path.join(port_dir, *out_dir.split("/"))
+    cb = cs = ib = None
+    for pat in (name + "_init.h", name + "_pch.h", "*.h"):
+        for h in sorted(glob.glob(os.path.join(gen_dir, pat))):
+            try:
+                txt = open(h, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                continue
+
+            def g(key):
+                m = re.search(key + r"\s+0x([0-9A-Fa-f]+)", txt)
+                return int(m.group(1), 16) if m else None
+
+            cb, cs, ib = g("REX_CODE_BASE"), g("REX_CODE_SIZE"), g("REX_IMAGE_BASE")
+            if None not in (cb, cs, ib):
+                break
+        if None not in (cb, cs, ib):
+            break
     if None in (cb, cs, ib):
         return None
     img = os.path.join(os.path.dirname(port_dir.rstrip("\\/")), name + "_image.bin")
     size = os.path.getsize(img) if os.path.exists(img) else 0x10000000
-    src = ep.get("file_path") or ""
-    return {"name": name, "manifest": man_path, "out_dir": out_dir,
+    src = field("file_path") or ""
+    return {"name": name, "manifest": man_path, "out_dir": out_dir, "image": img,
             "code_base": cb, "code_size": cs, "code_end": cb + cs,
             "image_base": ib, "image_end": ib + size,
             "source": src, "is_xex": src.lower().endswith(".xex")}
@@ -210,13 +238,19 @@ def parse_patches(text):
         if not line:
             continue
         if line == "[[patch]]":
-            cur = {"name": None, "desc": "", "author": "", "enabled_upstream": False, "writes": []}
+            cur = {"name": None, "desc": "", "author": "", "enabled_upstream": False,
+                   "writes": [], "unsupported": set()}
             out.append(cur)
             pending_width = None
             continue
         m = re.match(r"\[\[patch\.([a-z0-9]+)\]\]", line)
         if m:
             pending_width = m.group(1)
+            if cur is not None and pending_width not in WIDTHS:
+                # Um tipo de escrita que nao sabemos empacotar. Ignorar e seguir
+                # seria pior do que parar: aplicar so PARTE de um patch muda o
+                # jogo de um jeito que nem o autor nem o usuario pediram.
+                cur["unsupported"].add(pending_width)
             continue
         if cur is None:
             continue
@@ -237,9 +271,17 @@ def parse_patches(text):
         elif k == "value" and pending_width in WIDTHS:
             addrs = cur.get("_addr") or []
             if addrs:
+                try:
+                    raw = float(v) if pending_width in FLOATS else int(v, 0)
+                    data = _pack(pending_width, raw)
+                except (ValueError, OverflowError, struct.error):
+                    cur["unsupported"].add(pending_width)
+                    addrs.pop(0)
+                    continue
                 cur["writes"].append({"width": WIDTHS[pending_width],
+                                      "kind": pending_width,
                                       "address": addrs.pop(0),
-                                      "value": int(v, 0)})
+                                      "data": data})
     for p in out:
         p.pop("_addr", None)
     return [p for p in out if p["name"]]
@@ -253,6 +295,10 @@ def classify(patch, mods):
     modulo companheiro caia em "fora da imagem" e o patch saia selado RUNTIME --
     prometendo um toggle para algo que na verdade vira codigo nativo compilado.
     """
+    if patch.get("unsupported"):
+        return ("INVALIDO",
+                "escrita de tipo nao suportado (%s) -- aplicar so parte do patch"
+                % ", ".join(sorted(patch["unsupported"])), [])
     if not patch["writes"]:
         return "INVALIDO", "patch sem escritas", []
     reasons, touched, seal = [], [], "RUNTIME"
@@ -328,13 +374,34 @@ def cmd_list(port_dir, only_file=None):
 def _write_guest_patches(port_dir, mod, entries):
     """Um arquivo de patches por MODULO, porque e por modulo que a imagem e
     parcheada antes da analise -- escrever tudo no manifesto principal faria as
-    escritas do companheiro caírem num espaco de enderecos que nao e o delas."""
+    escritas do companheiro cairem num espaco de enderecos que nao e o delas.
+
+    Emite [[image_patch]], que e o schema que o rexglue le. Cada bloco carrega
+    tambem "expect": os bytes que a imagem tinha no momento da conversao. Se um
+    dia o port for reconstruido de um dump de outra build do jogo, o codegen
+    recusa em vez de nopear uma instrucao que nao e a que o autor do patch viu.
+    """
     out = os.path.join(port_dir, mod["name"] + "_guest_patches.toml")
+    img = b""
+    img_path = mod.get("image")
+    if img_path and os.path.exists(img_path):
+        img = open(img_path, "rb").read()
+    base = mod["image_base"]
+
+    def expect_at(addr, n):
+        off = addr - base
+        if not img or off < 0 or off + n > len(img):
+            return None
+        return img[off:off + n]
+
     with open(out, "w", encoding="utf-8", newline="\n") as f:
         f.write("# Gerado por gamepatches.py -- patches da comunidade\n")
         f.write("# (github.com/xenia-canary/game-patches), aplicados na imagem guest\n")
         f.write("# ANTES da analise, entao viram codigo nativo permanente.\n")
         f.write("# modulo: %s\n" % mod["name"])
+        if not img:
+            f.write("# AVISO: a imagem nao estava disponivel, entao os blocos sairam\n"
+                    "#        sem 'expect' -- o codegen aplica sem conferir a build.\n")
         n = 0
         for fname, p, seal, writes in entries:
             f.write("\n# [%s] %s\n" % (seal, p["name"]))
@@ -342,8 +409,13 @@ def _write_guest_patches(port_dir, mod, entries):
                 f.write("#   %s\n" % p["desc"])
             f.write("#   autor: %s | fonte: %s\n" % (p["author"] or "?", fname))
             for w in writes:
-                f.write("[[guest_patches]]\naddress = 0x%08X\nvalue = 0x%X\nwidth = %d\n"
-                        % (w["address"], w["value"], w["width"]))
+                f.write("[[image_patch]]\n")
+                f.write('name    = "%s"\n' % p["name"].replace('"', "'"))
+                f.write("address = 0x%08X\n" % w["address"])
+                f.write('data    = "%s"\n' % w["data"].hex().upper())
+                exp = expect_at(w["address"], len(w["data"]))
+                if exp is not None:
+                    f.write('expect  = "%s"\n' % exp.hex().upper())
                 n += 1
     return out, n
 
@@ -361,7 +433,124 @@ def _add_include(man, inc_name):
     return True
 
 
-def cmd_apply(port_dir, wanted, only_file=None):
+# --------------------------------------------------------------------------
+# API de biblioteca -- o que a GUI e o rexauto chamam
+# --------------------------------------------------------------------------
+def catalog(port_dir, only_file=None):
+    """O catalogo em forma de dados, para quem nao e um terminal.
+
+    Nunca levanta: quem chama e uma tela ou um build. Uma falha de rede ou um
+    titulo sem patches nao pode derrubar nenhum dos dois -- vira "error" e a
+    lista sai vazia.
+    """
+    out = {"name": None, "title_id": None, "modules": [], "patches": [],
+           "files": [], "error": None}
+    try:
+        name, tid, mods = port_identity(port_dir)
+    except SystemExit as e:
+        out["error"] = str(e)
+        return out
+    except Exception as e:
+        out["error"] = "%s: %s" % (type(e).__name__, e)
+        return out
+    out["name"], out["title_id"] = name, tid
+    out["modules"] = [{"name": m["name"], "code_base": m["code_base"],
+                       "code_end": m["code_end"], "image_base": m["image_base"],
+                       "image_end": m["image_end"]} for m in mods]
+    if not tid:
+        out["error"] = "sem title_id (nao achei ../game/default.xex)"
+        return out
+    try:
+        files = [only_file] if only_file else files_for_title(tid, port_dir)
+    except SystemExit as e:
+        out["error"] = str(e)
+        return out
+    except Exception as e:
+        out["error"] = "catalogo indisponivel: %s" % e
+        return out
+    out["files"] = list(files)
+    applied = applied_names(port_dir)
+    for fname in files:
+        try:
+            patches = parse_patches(fetch_patch_file(fname))
+        except Exception as e:
+            out["error"] = "nao consegui ler %s: %s" % (fname, e)
+            continue
+        for p in patches:
+            seal, why, touched = classify(p, mods)
+            out["patches"].append({
+                "file": fname, "name": p["name"], "desc": p["desc"],
+                "author": p["author"], "seal": seal, "why": why,
+                "writes": len(p["writes"]),
+                "modules": [m["name"] for m in touched],
+                "applied": p["name"] in applied,
+                "selectable": seal != "INVALIDO",
+            })
+    return out
+
+
+def applied_names(port_dir):
+    """Nomes dos patches ja gravados nos _guest_patches.toml do port.
+
+    Lido do arquivo e nao de um estado paralelo: o arquivo E a verdade, e e ele
+    que o codegen consome. Um marcador separado poderia divergir dele.
+    """
+    names = set()
+    try:
+        entries = os.listdir(port_dir)
+    except OSError:
+        return names
+    for f in entries:
+        if not f.endswith("_guest_patches.toml"):
+            continue
+        try:
+            txt = open(os.path.join(port_dir, f), encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        names.update(re.findall(r'^name\s*=\s*"([^"]*)"', txt, re.M))
+    return names
+
+
+def _drop_include(man, inc_name):
+    txt = open(man, encoding="utf-8", errors="ignore").read()
+    new = re.sub(r',\s*"%s"' % re.escape(inc_name), "", txt)
+    new = re.sub(r'"%s"\s*,\s*' % re.escape(inc_name), "", new)
+    new = re.sub(r'\[\s*"%s"\s*\]' % re.escape(inc_name), "[]", new)
+    if new == txt:
+        return False
+    open(man, "w", encoding="utf-8", newline="\n").write(new)
+    return True
+
+
+def clear(port_dir):
+    """Desfaz tudo: apaga os arquivos de patch e tira os includes.
+
+    Precisa existir porque desmarcar na tela tem de voltar o port ao estado sem
+    patch -- deixar o arquivo e so tirar o include deixaria uma bomba armada
+    para o proximo que reativasse o include a mao.
+    """
+    removed = []
+    for mod in port_modules(port_dir):
+        f = os.path.join(port_dir, mod["name"] + "_guest_patches.toml")
+        if os.path.exists(f):
+            os.remove(f)
+            removed.append(os.path.basename(f))
+        _drop_include(mod["manifest"], mod["name"] + "_guest_patches.toml")
+    return removed
+
+
+def apply(port_dir, wanted, only_file=None):
+    """Grava os patches escolhidos e garante os includes. Devolve um resumo.
+
+    Sempre parte do zero (clear antes): a lista marcada na tela e a verdade
+    completa, entao aplicar por cima acumularia patches que o usuario desmarcou.
+    """
+    wanted = set(wanted or [])
+    clear(port_dir)
+    if not wanted:
+        return {"patches": [], "writes": 0, "modules": 0, "needs_rebuild": False,
+                "files": []}
+
     name, tid, mods = port_identity(port_dir)
     chosen = []
     for fname in ([only_file] if only_file else files_for_title(tid, port_dir)):
@@ -369,13 +558,12 @@ def cmd_apply(port_dir, wanted, only_file=None):
             if p["name"] in wanted:
                 seal, why, touched = classify(p, mods)
                 if seal == "INVALIDO":
-                    raise SystemExit("patch '%s' invalido: %s" % (p["name"], why))
+                    raise ValueError("patch '%s' invalido: %s" % (p["name"], why))
                 chosen.append((fname, p, seal))
-    missing = set(wanted) - {p["name"] for _, p, _ in chosen}
+    missing = wanted - {p["name"] for _, p, _ in chosen}
     if missing:
-        raise SystemExit("nao achei no catalogo: %s" % ", ".join(sorted(missing)))
+        raise ValueError("nao achei no catalogo: %s" % ", ".join(sorted(missing)))
 
-    # agrupa as escritas pelo modulo que as contem
     per_mod = {}
     for fname, p, seal in chosen:
         buckets = {}
@@ -385,20 +573,31 @@ def cmd_apply(port_dir, wanted, only_file=None):
         for mname, writes in buckets.items():
             per_mod.setdefault(mname, []).append((fname, p, seal, writes))
 
-    total = 0
+    total, files = 0, []
     for mod in mods:
         entries = per_mod.get(mod["name"])
         if not entries:
             continue
         out, n = _write_guest_patches(port_dir, mod, entries)
         total += n
-        added = _add_include(mod["manifest"], os.path.basename(out))
-        print("%s: %d escrita(s) -> %s  (manifesto: %s)"
-              % (mod["name"], n, os.path.basename(out),
-                 "include adicionado" if added else "include ja presente"))
-    print("\ntotal: %d patch(es), %d escrita(s) em %d modulo(s)"
-          % (len(chosen), total, len(per_mod)))
-    if any(seal == "RECOMPILAR" for _, _, seal in chosen):
+        _add_include(mod["manifest"], os.path.basename(out))
+        files.append(os.path.basename(out))
+    return {"patches": [p["name"] for _, p, _ in chosen], "writes": total,
+            "modules": len(per_mod), "files": files,
+            "needs_rebuild": any(s == "RECOMPILAR" for _, _, s in chosen)}
+
+
+def cmd_apply(port_dir, wanted, only_file=None):
+    """Casca de terminal em cima de apply() -- um caminho so para os dois."""
+    try:
+        r = apply(port_dir, wanted, only_file)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    for f in r["files"]:
+        print("gravado: %s" % f)
+    print("total: %d patch(es), %d escrita(s) em %d modulo(s)"
+          % (len(r["patches"]), r["writes"], r["modules"]))
+    if r["needs_rebuild"]:
         print("RECOMPILAR: rode o codegen + build do port para o patch entrar no codigo nativo.")
 
 

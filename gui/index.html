@@ -173,6 +173,25 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:14px;
 .toggle .sw::after{content:"";position:absolute;top:2px;left:2px;width:17px;height:17px;border-radius:50%;background:#fff;transition:.25s}
 .toggle.on .sw{background:linear-gradient(90deg,var(--xgd),var(--xg2))}
 .toggle.on .sw::after{left:19px}
+.patchbtn{border:1px solid var(--bd);background:rgba(255,255,255,.03);color:var(--mut);cursor:pointer;
+  font-family:var(--mono);font-size:11px;letter-spacing:1px;padding:13px 16px;border-radius:11px;transition:.2s;white-space:nowrap}
+.patchbtn:hover{color:var(--xg2);border-color:var(--xgd)}
+.patchbtn b{color:var(--xg2);font-weight:700}
+.plist{display:flex;flex-direction:column;gap:7px;max-height:46vh;overflow:auto;margin:14px 0 4px}
+.prow{display:grid;grid-template-columns:22px 1fr auto;gap:10px;align-items:start;padding:10px 12px;
+  border:1px solid var(--bd);border-radius:10px;background:rgba(255,255,255,.02);cursor:pointer;transition:.15s}
+.prow:hover{border-color:var(--xgd);background:rgba(155,240,11,.04)}
+.prow.off{opacity:.42;cursor:not-allowed}
+.prow input{accent-color:var(--xg2);width:15px;height:15px;margin-top:2px;cursor:inherit}
+.pname{font-weight:650;font-size:13px}
+.pdesc{color:var(--mut);font-size:11.5px;margin-top:3px;line-height:1.45}
+.pmeta{color:var(--mut);font-family:var(--mono);font-size:10px;margin-top:4px;opacity:.75}
+.seal{font-family:var(--mono);font-size:9.5px;letter-spacing:.6px;padding:3px 7px;border-radius:6px;white-space:nowrap}
+.seal.rec{background:rgba(155,240,11,.12);color:var(--xg2);border:1px solid var(--xgd)}
+.seal.run{background:rgba(120,170,255,.12);color:#8ab4ff;border:1px solid rgba(120,170,255,.35)}
+.seal.bad{background:rgba(255,90,90,.1);color:#ff7b7b;border:1px solid rgba(255,90,90,.3)}
+.pfoot{display:flex;align-items:center;gap:12px;margin-top:12px;flex-wrap:wrap}
+.pnote{color:var(--mut);font-size:11.5px;line-height:1.5;flex:1;min-width:220px}
 .go{position:relative;border:none;cursor:pointer;color:#06120a;font-weight:800;font-size:14px;letter-spacing:1px;
   padding:15px 32px;border-radius:13px;background:linear-gradient(110deg,var(--xg2),var(--xg) 60%,var(--xgd));
   box-shadow:0 12px 36px -10px rgba(108,192,74,.7);transition:.2s;overflow:hidden;text-transform:uppercase;white-space:nowrap}
@@ -329,6 +348,7 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:14px;
     <div class="field nm"><label>NAME</label>
       <input id="name" spellcheck="false" value="game">
     </div>
+    <button class="patchbtn" id="patchbtn">PATCHES</button>
     <div class="toggle" id="runtoggle"><span class="sw"></span>LAUNCH</div>
     <button class="go" id="go">Recompile</button>
   </section>
@@ -352,6 +372,22 @@ main{flex:1;display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:14px;
         <div class="sprog" id="sprog"><i id="sprogi"></i></div>
       </div>
       <div class="setuplog" id="setuplog"></div>
+    </div>
+  </div>
+  <div class="overlay" id="poverlay">
+    <div class="glass modal">
+      <button class="close" id="pclose">&#10005;</button>
+      <h2>&#9881; Community patches</h2>
+      <div class="sub">Byte patches published by the emulation community
+        (<b>xenia-canary/game-patches</b>), matched to this title by its ID.
+        rexauto compiles them into the port instead of poking memory at runtime &mdash;
+        a static recompiler translates each guest instruction once, so a code patch
+        only takes effect if it is applied <b>before</b> codegen.</div>
+      <div class="plist" id="plist"></div>
+      <div class="pfoot">
+        <button class="ibtn" id="psave">Save selection</button>
+        <div class="pnote" id="pnote"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -495,8 +531,87 @@ go.addEventListener('click',async()=>{
   setStatus('running','var(--xg2)');
   addLog('info','pipeline started for '+name);
   await fetch('/api/start',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({container,name,run:doRun})});
+    body:JSON.stringify({container,name,run:doRun,patches:patchSel})});
 });
+
+
+/* Nomes e descricoes vem de um repositorio de terceiros: texto nao
+   confiavel indo para dentro da pagina. Escapa antes de interpolar. */
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+
+/* ---------------- community patches ---------------- */
+const poverlay=document.getElementById('poverlay');
+const plist=document.getElementById('plist');
+const pnote=document.getElementById('pnote');
+let patchSel=null;   /* null = nunca abriu; a tela nao opina sobre o port */
+
+function projName(){return document.getElementById('name').value.trim()||'game';}
+
+function renderPatches(c){
+  plist.innerHTML='';
+  if(c.error && !(c.patches||[]).length){
+    plist.innerHTML='<div class="pnote">'+esc(c.error)+
+      '<br><br>The catalogue is matched by title ID and needs the port generated once '+
+      '(run the pipeline), plus network access to fetch it.</div>';
+    pnote.textContent=''; return;
+  }
+  const sealCls={RECOMPILAR:'rec',RUNTIME:'run',INVALIDO:'bad'};
+  (c.patches||[]).forEach(p=>{
+    const row=document.createElement('label');
+    row.className='prow'+(p.selectable?'':' off');
+    const cb=document.createElement('input');
+    cb.type='checkbox'; cb.checked=!!p.applied; cb.disabled=!p.selectable; cb.dataset.name=p.name;
+    const mid=document.createElement('div');
+    mid.innerHTML='<div class="pname">'+esc(p.name)+'</div>'+
+      (p.desc?'<div class="pdesc">'+esc(p.desc)+'</div>':'')+
+      '<div class="pmeta">'+(p.author?esc(p.author)+' &middot; ':'')+p.writes+
+      ' write'+(p.writes===1?'':'s')+(p.seal==='INVALIDO'?' &middot; '+esc(p.why):'')+'</div>';
+    const seal=document.createElement('span');
+    seal.className='seal '+(sealCls[p.seal]||'bad'); seal.textContent=p.seal;
+    row.append(cb,mid,seal); plist.appendChild(row);
+  });
+  const n=(c.patches||[]).filter(p=>p.applied).length;
+  pnote.innerHTML='<b>'+n+'</b> applied &middot; RECOMPILAR writes into .text, so it needs a '+
+    'pipeline re-run to become native code. RUNTIME only touches data.';
+  syncPatchBtn(c);
+}
+
+function selectedPatches(){
+  return [...plist.querySelectorAll('input:checked')].map(i=>i.dataset.name);
+}
+
+function syncPatchBtn(c){
+  const n=(c&&c.patches?c.patches.filter(p=>p.applied).length:(patchSel||[]).length);
+  document.getElementById('patchbtn').innerHTML=n?('PATCHES <b>'+n+'</b>'):'PATCHES';
+}
+
+document.getElementById('patchbtn').onclick=async()=>{
+  poverlay.classList.add('show');
+  plist.innerHTML='<div class="pnote">loading catalogue&hellip;</div>';
+  try{
+    const r=await fetch('/api/patches?name='+encodeURIComponent(projName()));
+    const c=await r.json(); renderPatches(c); patchSel=selectedPatches();
+  }catch(e){plist.innerHTML='<div class="pnote">catalogue unreachable: '+esc(String(e))+'</div>';}
+};
+document.getElementById('pclose').onclick=()=>poverlay.classList.remove('show');
+poverlay.onclick=e=>{if(e.target===poverlay)poverlay.classList.remove('show');};
+
+document.getElementById('psave').onclick=async()=>{
+  const wanted=selectedPatches();
+  pnote.textContent='saving…';
+  try{
+    const r=await fetch('/api/patches',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:projName(),patches:wanted})});
+    const j=await r.json();
+    if(!j.ok){pnote.textContent='failed: '+(j.error||'unknown');return;}
+    patchSel=wanted;
+    pnote.innerHTML='<b>'+wanted.length+'</b> written ('+j.writes+' write'+(j.writes===1?'':'s')+')'+
+      (j.needs_rebuild?' &middot; re-run the pipeline so they become native code.':'');
+    addLog('info',wanted.length? ('game patches saved: '+wanted.join(', ')) : 'game patches cleared');
+    syncPatchBtn(null);
+  }catch(e){pnote.textContent='failed: '+String(e);}
+};
 
 /* ---------------- setup / dependencies ---------------- */
 const overlay=document.getElementById('overlay');

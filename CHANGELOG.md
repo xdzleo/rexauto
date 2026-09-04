@@ -1,5 +1,130 @@
 # Changelog
 
+## 2.35.0 — "a patch nobody can reach is not a patch" (2026-09-04)
+
+**The community has published byte patches for these games for years, and a
+static recompiler could not use a single one of them.** This release makes that
+catalogue reachable, and gives every generated port a launcher. Ships a new
+**ReXGlue SDK** (v0.10.0 + four fixes, all sent upstream).
+
+### Community game patches, compiled in
+
+`xenia-canary/game-patches` holds thousands of entries keyed by title ID —
+framerate unlocks, aspect-ratio fixes, engine bug fixes — as lists of byte
+writes at guest addresses. An emulator pokes those into guest memory at load.
+**We cannot.** rexauto is a static recompiler: a guest instruction is translated
+once, ahead of time, and the native code never reads guest memory for it again.
+A code patch only means anything if the image carries it *before* codegen.
+
+So it lands there. The SDK gained an `[[image_patch]]` block applied to the
+decoded image right after load, and rexauto converts the community entries into
+it. Gears of War Judgment's "Unlock FPS" comes out as a `nop` where the game had
+`lfs f1,1228(r3)` — its 30 fps cap is gone, and the recompilation is unchanged
+(99.2073% of code bytes, 60,146 functions, 0 holes, byte-for-byte the same
+numbers as the unpatched build).
+
+Each patch carries a **seal**, because the distinction is not cosmetic:
+
+- `RECOMPILAR` — at least one write lands in `.text`. It becomes native code and
+  needs a rebuild. There is no instant toggle for it, and promising one would be
+  a lie.
+- `RUNTIME` — every write lands outside `.text`.
+
+Choose them in the GUI (a **PATCHES** panel with the seal on each row), or with
+`--list-patches`, `--patch "Unlock FPS"`, `--no-patches`.
+
+### The guard, because the wrong dump is a silent miscompile
+
+Two builds of the same title put the same patch at different addresses — on
+Judgment "Unlock FPS" is `0x8255DE08` on the base game and `0x8255E220` on TU4.
+Applying the wrong one does not fail; it overwrites an unrelated instruction and
+the symptom shows up somewhere else entirely.
+
+Every generated block records `expect`: the bytes the image held when the patch
+was converted. A mismatch is refused with a diagnostic instead of applied.
+Verified by corrupting an `expect` on purpose — the patch is skipped, the
+original instruction survives in the generated code, and the log says why.
+`do_codegen` now surfaces that refusal, which it previously captured and dropped
+on success.
+
+### Three bugs in the module that was supposed to do this
+
+`gamepatches.py` existed and could never have run:
+
+- It imported `tomllib` (Python 3.11+). rexauto is frozen from **3.10**.
+- It read the code ranges from `<name>_init.h` only. v0.10.0 puts them in
+  `<name>_pch.h`, so it gave up with "nenhum modulo utilizavel" on every port
+  built by the current SDK — the same one-filename assumption that 2.34.0 fixed
+  everywhere else.
+- It silently dropped `f32` writes. The Judgment file has four. A patch mixing
+  `be32` and `f32` would have been applied **half way** — worse than not at all.
+  Unsupported write kinds now refuse the whole patch.
+
+The module is also no longer a standalone script: `catalog()` / `apply()` /
+`clear()` back the CLI, the GUI and the build stage from one code path.
+
+### A launcher for every port
+
+The port executable has no options screen, and resolution, monitor, fullscreen
+and frame cap are runtime cvars that can only be chosen through `REX_*`
+environment variables *before* the process starts. Until now the only way to
+pick them was editing a `.cmd` by hand.
+
+Every successful build now writes `Launcher <name>.cmd` + `launcher.ps1` beside
+the exe — WinForms through PowerShell, so it needs nothing installed. It lists
+each monitor's native resolution first, then 720p → 4K, and hides anything
+outside the guest video mode's real limit (640–4095 per axis, so a 5120-wide
+ultrawide is not offered rather than rejected at startup). Choices persist in
+`launcher.json`.
+
+**Frame limiting is on by default**, and it drops two cvars together:
+`REX_VSYNC=true` *and*
+`REX_D3D12_ALLOW_VARIABLE_REFRESH_RATE_AND_TEARING=false`. Vsync alone caps
+nothing while tearing is allowed — that is why an uncapped Judgment renders 421
+fps on a title screen.
+
+### SDK: v0.10.0 plus four fixes, all upstreamed
+
+- **`xam_content`: dangling guest `string_view` across the deferred completion.**
+  `XamContentCreate` captured a view over guest memory into the lambda handed to
+  `CompleteOverlappedDeferredEx`; by the time the dispatch thread ran it, the
+  title had reused the buffer. The stale bytes reached `string_key_case::hash()`
+  → utf8 iteration → `utf8::invalid_utf8` → `[FATAL] Dispatch thread: deferred
+  completion threw 'Invalid UTF-8'` and a `0xC0000409` fastfail. Judgment
+  reproduced it in 13 s, three runs out of three; with the fix it ran 108 s
+  clean. **We fixed this once already, in 2.6.0, in a fork — and never
+  upstreamed it, so v0.10.0 shipped it back to us.** That is the whole argument
+  for sending patches up.
+- **Branch/call targets resolved from the graph** when the per-site `CallTarget`
+  table has no entry: 39 sites on Judgment became `REX_FATAL` at runtime despite
+  the graph knowing the function. 39 holes → 0.
+- **Out-of-range jump-table index dispatches instead of trapping.**
+  `__builtin_trap()` lowers to `ud2`; Judgment died in 5 s at one of 121 such
+  defaults with `STATUS_ILLEGAL_INSTRUCTION` and nothing in the log. Compiling a
+  representative switch both ways at `-O2` gives a byte-identical dispatch
+  prologue — same bounds check, same table, same `jmp rax`; the difference is one
+  instruction in the cold block.
+- **`[[image_patch]]`**, above.
+
+Upstream: [#427](https://github.com/rexglue/rexglue-sdk/pull/427) and the four
+branches on `xdzleo/rexglue-sdk`.
+
+### Honest limits
+
+The v0.10.0 Judgment port still dies non-deterministically between roughly 50 s
+and 160 s, with a raw fastfail and no `REX_FATAL` — memory corruption without a
+diagnostic. It happens with and without the community patches, so it is not
+theirs. Unfixed, and named here rather than left for you to find.
+
+`closure.py` still reports "0 targets resolved statically" on v0.10.0: it reads
+0.8.2's address-form switch cases (`case 0x822C6964:`) and v0.10.0 emits the
+index form (`case 0:`). The coverage number is unaffected; the jump-table
+sub-count is wrong.
+
+The SDK's own `resolution` preset cvar (`720p`/`1080p`/`4k`) is **defined and
+never read** — a documented option that does nothing. The launcher writes
+`video_mode_width`/`height` directly instead.
+
 ## 2.34.0 — "a silent pass is worse than a broken one" (2026-09-04)
 
 **Every discovery pass we shipped was dead on ReXGlue v0.10.0, and said nothing.**

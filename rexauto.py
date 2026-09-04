@@ -43,6 +43,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import closure as _closure
 import extract as _extract
+import gamepatches as _gamepatches
+import launcher as _launcher
 import heal as _heal
 import jt_landings as _jt
 import codegen_patches as _cgp
@@ -1074,6 +1076,23 @@ def do_codegen(ctx, env=None, level="error"):
             # FOV / ultrawide-frustum render hooks) once codegen has converged and
             # before compile. No <name>_codegen_patches.toml -> no-op (byte-identical).
             _cgp.apply(ctx, log=ctx.log)
+            # Surface what the image patches did. rexglue reports them on its own
+            # output, which is captured and normally dropped on success -- so a
+            # patch REFUSED because the game dump is a different build than the
+            # one the patch was written against would vanish silently and the run
+            # would look like a clean patched build. It is not: the port comes out
+            # unpatched. Deduped because codegen runs several times per build.
+            for _l in out.splitlines():
+                _i = _l.find("[[image_patch]]")
+                if _i < 0:
+                    continue
+                _msg = _l[_i + len("[[image_patch]]"):].strip()
+                if _msg in getattr(ctx, "_patch_warned", ()):
+                    continue
+                ctx._patch_warned = set(getattr(ctx, "_patch_warned", set())) | {_msg}
+                ctx.log("  image patch REFUSED: %s" % _msg)
+                ctx.log("  -> it is NOT in this build; it was written against a "
+                        "different dump of the game.")
             # Built-in correctness repair, not a per-title patch: SDK 0.8.2 lowers
             # an in-place vpkuwus/vpkuhus so its narrow writes clobber the wide
             # reads of the same register. Fixed upstream in 0.10.0; we ship a
@@ -1182,7 +1201,51 @@ def write_game_root(ctx):
                 f.write(os.path.abspath(ctx.game) + "\n")
     except OSError as ex:
         ctx.log("could not write game_root.txt sidecar (%s)" % ex)
+    copy_gpu_plugins(ctx)
     write_play_launcher(ctx)
+    # Graphical launcher: the exe has no options screen, and resolution / monitor
+    # / frame cap are runtime cvars that can only be chosen through REX_* env vars
+    # BEFORE the process starts. Without this the only way to pick them is editing
+    # a .cmd by hand.
+    _gpu = gpu_plugins(ctx)
+    _launcher.write(ctx, _gpu[0] if _gpu else None, log=ctx.log)
+
+
+def gpu_plugins(ctx):
+    """GPU plugin names shipped by the SDK in use, e.g. ["xenos"].
+
+    ReXGlue 0.8.2 links the GPU into the runtime and has none. v0.10.0 moved it
+    out to rexgpu-<name>.dll, loaded only when the `gpu_plugin` cvar names one --
+    without it the runtime logs "no GPU emulation loaded (gpu_plugin not set);
+    call ignored" for every Vd* call and the port renders nothing at all, with no
+    error. Empty list on an SDK that has no plugins, so 0.8.2 is untouched."""
+    sdk = ctx.env.get("sdk") or ""
+    out = []
+    for p in glob.glob(os.path.join(sdk, "bin", "rexgpu-*.dll")):
+        name = os.path.basename(p)[len("rexgpu-"):-len(".dll")]
+        if name:
+            out.append(name)
+    return sorted(out)
+
+
+def copy_gpu_plugins(ctx):
+    """Put the SDK's GPU plugin DLLs beside the exe. The SDK's own CMake copies
+    rexruntime.dll but not these, so a v0.10.0 port could not find its GPU even
+    once the cvar was set."""
+    names = gpu_plugins(ctx)
+    if not names:
+        return
+    sdk = ctx.env.get("sdk") or ""
+    for n in names:
+        src = os.path.join(sdk, "bin", "rexgpu-%s.dll" % n)
+        dst = os.path.join(ctx.builddir, "rexgpu-%s.dll" % n)
+        try:
+            if os.path.exists(src) and (not os.path.exists(dst)
+                                        or os.path.getmtime(src) > os.path.getmtime(dst)):
+                shutil.copy2(src, dst)
+                ctx.log("  GPU plugin: rexgpu-%s.dll copied beside the exe" % n)
+        except OSError as ex:
+            ctx.log("  could not copy rexgpu-%s.dll (%s)" % (n, ex))
 
 
 def write_play_launcher(ctx):
@@ -1207,6 +1270,7 @@ def write_play_launcher(ctx):
     if os.environ.get("REXAUTO_NO_PLAY_LAUNCHER"):
         return
     try:
+        gpu = gpu_plugins(ctx)
         path = os.path.join(ctx.builddir, "play %s.cmd" % ctx.name)
         with open(path, "w", encoding="utf-8", newline="\r\n") as f:
             f.write(
@@ -1215,8 +1279,23 @@ def write_play_launcher(ctx):
                 "rem functions the static scan never discovered: an unresolved indirect\r\n"
                 "rem call is logged and returns instead of killing the process.\r\n"
                 "rem Run the .exe directly for the strict behaviour the heal needs.\r\n"
-                "set REX_HEAL_DISCOVER=1\r\n"
-                'start "" "%%~dp0%s.exe" %%*\r\n' % (ctx.name, ctx.name))
+                "set REX_HEAL_DISCOVER=1\r\n" % ctx.name)
+            if gpu:
+                f.write(
+                    "rem This SDK ships the GPU as a plugin. Without naming one the\r\n"
+                    "rem runtime loads no GPU at all and the port renders nothing,\r\n"
+                    "rem reporting only \"gpu_plugin not set; call ignored\".\r\n"
+                    "set REX_GPU_PLUGIN=%s\r\n" % gpu[0])
+            # Pass the game root explicitly. The game_root.txt sidecar is read
+            # only by our fork's patch; stock ReXGlue v0.10.0 answers
+            # "--game_data_root was not provided" and exits. Naming it here works
+            # on both and costs nothing.
+            root = os.path.abspath(ctx.game) if ctx.game else ""
+            if root:
+                f.write('start "" "%%~dp0%s.exe" --game_data_root="%s" %%*\r\n'
+                        % (ctx.name, root))
+            else:
+                f.write('start "" "%%~dp0%s.exe" %%*\r\n' % ctx.name)
     except OSError as ex:
         ctx.log("could not write the play launcher (%s)" % ex)
 
@@ -2234,6 +2313,49 @@ def _pointer_scan_register(ctx):
     return new + sorted(a for a in lab if a not in known)
 
 
+def apply_game_patches(ctx):
+    """Grava no port os patches da comunidade escolhidos, antes do codegen.
+
+    Tem de rodar ANTES do codegen porque quase todo patch do catalogo escreve em
+    .text: num recompilador estatico a instrucao e traduzida uma vez e vira
+    codigo nativo, entao um patch que chegue depois nao muda mais nada. E o
+    motivo de nao existir um liga/desliga instantaneo para eles.
+
+    Sem --patch nem --no-patches nao mexe em nada: a selecao ja gravada no port
+    (pela GUI ou a mao) e a verdade, e um build comum nao pode apaga-la.
+    """
+    wanted = getattr(ctx.args, "patch", None)
+    if not wanted and not getattr(ctx.args, "no_patches", False):
+        applied = _gamepatches.applied_names(ctx.port)
+        if applied:
+            ctx.log("game patches: %d ja aplicado(s) no port (%s)"
+                    % (len(applied), ", ".join(sorted(applied))))
+        return
+
+    # A classificacao e o "expect" leem as faixas dos headers gerados; num
+    # projeto novo eles ainda nao existem. Um codegen de partida resolve, e o
+    # loop de build regenera em seguida de qualquer jeito.
+    if not glob.glob(os.path.join(ctx.gen, "*.h")):
+        ctx.log("game patches: gerando uma vez para descobrir as faixas do modulo")
+        do_codegen(ctx)
+
+    try:
+        r = _gamepatches.apply(ctx.port, wanted or [])
+    except (ValueError, SystemExit) as e:
+        raise SystemExit("game patches: %s" % e)
+    except Exception as e:
+        raise SystemExit("game patches: %s: %s" % (type(e).__name__, e))
+
+    if not r["patches"]:
+        ctx.log("game patches: nenhum (port limpo)")
+    else:
+        ctx.log("game patches: %d aplicado(s), %d escrita(s) -> %s"
+                % (len(r["patches"]), r["writes"], ", ".join(r["files"])))
+        for n in r["patches"]:
+            ctx.log("  + %s" % n)
+    ctx._game_patches = r["patches"]
+
+
 def stage_build(ctx):
     miss = [k for k in ("vcvars", "clang", "clangxx", "sdk") if not ctx.env[k]]
     if miss:
@@ -2243,6 +2365,7 @@ def stage_build(ctx):
     if not _heal.load_overrides(ctx.functions):  # fresh project -> seed from the shared gabarito
         fetch_gabarito(ctx)
     setup_extra_modules(ctx)   # codegen + wire any extra recompiled modules (no-op if none)
+    apply_game_patches(ctx)    # community patches land in the image before codegen
     last_ends = None
     oom_parallel = None
     skip_codegen = False
@@ -3073,20 +3196,41 @@ def stage_run(ctx):
 # and tested with. Override (advanced, may produce broken builds) by setting
 # REXAUTO_SKIP_SDK_CHECK=1. Bump these when the bundled SDK is updated.
 SDK_PIN = {
-    # v2.27: re-pinned to rexglue-sdk f9b732b, which removes the per-function deep copy
-    # of the known-function set in phase_discover. Codegen is 20.7x faster across the
-    # measured fleet (661.4s -> 31.9s on eight titles spanning 7k to 94k functions) and
-    # byte-identical: the 30-title gate reports 28 PASS plus the two intentional diffs,
-    # and an old-vs-new codegen of both of those differs in ZERO files.
+    # v2.35: ReXGlue v0.10.0 becomes the default SDK, built from source with four
+    # fixes on top -- all four are open upstream, so this pin is a fork only until
+    # they land:
     #
-    # Also carries the Xenia Canary content adoptions validated in gameplay: the empty
-    # resolve region returning true with zero extent, the 7-bit float mantissa shift
-    # (<<3 -> <<16), the D3D12 scaled-resolve texture dimensions, XamMediaVerification,
-    # the BaseHeap::Reset free-page recount, the three PhysicalHeap parent-reservation
-    # leaks, draw_resolution_scale defaulting to 1, and the perf frame counters wired to
-    # something that actually closes a frame.
-    "rexglue.exe": "c768c4fb1c3a427c6d11e23ceeabe3e72dfbff44d08c59532c44dc8212fc0481",
-    "rexruntime.dll": "c3a96c19523de3ad1682e95f540bb12661cbf81df03b63834baf7656b688f388",
+    #   * xam_content: XamContentCreate captured a std::string_view over GUEST
+    #     memory into the lambda it hands to CompleteOverlappedDeferredEx. By the
+    #     time the dispatch thread ran it the title had reused the buffer, and the
+    #     stale bytes reached utf8 iteration -> utf8::invalid_utf8 -> FATAL ->
+    #     0xC0000409. Gears of War Judgment died at 13s, three runs of three; 108s
+    #     clean with the fix. We already fixed this once, in 2.6.0, in a fork we
+    #     never upstreamed -- which is exactly how v0.10.0 shipped it back to us.
+    #   * codegen: resolve a call/branch target from the graph when the per-site
+    #     CallTarget table has no entry, instead of emitting REX_FATAL. 39 sites on
+    #     Judgment, 28 of them conditional back-edges into registered functions.
+    #     39 holes -> 0.
+    #   * codegen: an out-of-range jump-table index dispatches instead of
+    #     __builtin_trap(). The trap lowers to ud2, so it killed the process with
+    #     STATUS_ILLEGAL_INSTRUCTION and nothing in the log -- 5s into Judgment, at
+    #     one of 121 such defaults. The hot path is unchanged: the same switch at
+    #     -O2 gives a byte-identical dispatch prologue either way.
+    #   * codegen: [[image_patch]], byte patches applied to the decoded image
+    #     before analysis. This is what makes the community patch catalogues usable
+    #     in a static recompiler at all -- see gamepatches.py.
+    #
+    # Verified no recompilation regression against the 0.8.2 baseline on Judgment:
+    # 99.2073% of code bytes vs 99.1979%, 60,146 functions vs 60,137, 0 holes in
+    # both, and identical numbers before and after the clang-format pass that the
+    # upstream CI requires.
+    #
+    # rexgpu-xenos.dll is pinned as well now: v0.10.0 moved the GPU out into a
+    # plugin, so an SDK whose runtime matches but whose plugin does not renders
+    # nothing while reporting only "gpu_plugin not set; call ignored".
+    "rexglue.exe": "563b1a0c1b029efb3eab34dc369b5cbca00d6084d6829fe5b92e978dae2a2776",
+    "rexruntime.dll": "56eec5aa02cefb92b1a979f129b145f86a53a49b407d94b4906a69c2336b359e",
+    "rexgpu-xenos.dll": "6701c65c85af0d5e01c3b007e3705a435138e6c59a320734d3d94ace6eb0d1c6",
 }
 
 
@@ -3118,8 +3262,10 @@ def verify_sdk_pin(env):
     rexglue = env.get("rexglue")
     if not rexglue:
         return
+    _bin = os.path.dirname(rexglue)
     targets = [("rexglue.exe", rexglue),
-               ("rexruntime.dll", os.path.join(os.path.dirname(rexglue), "rexruntime.dll"))]
+               ("rexruntime.dll", os.path.join(_bin, "rexruntime.dll")),
+               ("rexgpu-xenos.dll", os.path.join(_bin, "rexgpu-xenos.dll"))]
     for name, path in targets:
         want = SDK_PIN.get(name)
         if not want or not path or not os.path.exists(path):
@@ -3290,12 +3436,45 @@ def main():
                          "build the base game version")
     ap.add_argument("--heal-iters", type=int, default=20)
     ap.add_argument("--run-seconds", type=int, default=22)
+    ap.add_argument("--patch", action="append", metavar="NAME",
+                    help="community patch to compile in (repeatable); see --list-patches")
+    ap.add_argument("--no-patches", action="store_true",
+                    help="remove every community patch from the port and rebuild clean")
+    ap.add_argument("--list-patches", action="store_true",
+                    help="list the community patches available for this title and exit")
     ap.add_argument("--publish-gabarito", action="store_true",
                     help="write the discovered cures to gabaritos/ (keyed by xex hash) to share")
     args = ap.parse_args()
 
     env = detect_env()
     ctx = Ctx(args, env)
+    if args.list_patches:
+        # Antes do preflight: so lista, nao constroi nada, entao exigir clang e
+        # vcvars aqui seria barrar quem so quer ver o que existe para o titulo.
+        c = _gamepatches.catalog(ctx.port)
+        print("port=%s  title_id=%s" % (c["name"] or args.name, c["title_id"] or "?"))
+        if c["error"]:
+            print("aviso: %s" % c["error"])
+        if not c["patches"]:
+            print("nenhum patch da comunidade para este titulo")
+            raise SystemExit(0)
+        print("fonte: github.com/xenia-canary/game-patches -- %s" % ", ".join(c["files"]))
+        print()
+        for p in c["patches"]:
+            mark = "x" if p["applied"] else " "
+            print("[%s] [%-10s] %s" % (mark, p["seal"], p["name"]))
+            if p["desc"]:
+                print("        %s" % p["desc"][:100])
+            if p["author"]:
+                print("        autor: %s | %d escrita(s) | %s"
+                      % (p["author"], p["writes"], p["why"][:70]))
+        print()
+        print("RECOMPILAR escreve em .text: entra no codigo nativo e exige rebuild do port.")
+        print("RUNTIME so toca dados.  [x] = ja aplicado.")
+        print('aplicar:  --patch "Unlock FPS" --patch "Disable Film Grain"')
+        print("limpar:   --no-patches")
+        raise SystemExit(0)
+
     ctx.log("tools: rexglue=%s sdk=%s clang=%s ida=%s vcvars=%s"
             % (bool(env["rexglue"]), bool(env["sdk"]), bool(env["clang"]),
                bool(env["idat"]), bool(env["vcvars"])))

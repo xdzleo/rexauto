@@ -29,7 +29,8 @@ ROOT = os.path.dirname(HERE)
 for _p in (ROOT, HERE, getattr(sys, "_MEIPASS", "")):
     if _p and _p not in sys.path:
         sys.path.insert(0, _p)
-import extract as _extract  # noqa: E402
+import extract as _extract
+import gamepatches as _gamepatches  # noqa: E402
 import setup as _setup  # noqa: E402
 
 STAGES = ["extract", "init", "setjmp", "jumptables", "build", "runheal", "run"]
@@ -46,7 +47,13 @@ def index_path():
     return os.path.join(HERE, "index.html")
 
 
-def pipeline_command(container, name, do_run):
+def _port_dir(name):
+    """Onde o port deste projeto mora -- mesma conta que o Ctx do rexauto faz."""
+    work = os.environ.get("REXAUTO_WORK", r"C:\Skate3\autoports")
+    return os.path.join(work, name, "port")
+
+
+def pipeline_command(container, name, do_run, patches=None):
     """Frozen app re-invokes itself in pipeline mode; a script run calls rexauto.py."""
     if FROZEN:
         cmd = [sys.executable, "--__pipeline", container, "--name", name]
@@ -54,6 +61,13 @@ def pipeline_command(container, name, do_run):
         cmd = [sys.executable, "-u", os.path.join(ROOT, "rexauto.py"), container, "--name", name]
     if do_run:
         cmd.append("--run")
+    # A selecao da tela e a verdade completa: mandar --no-patches quando ela esta
+    # vazia e o que faz DESmarcar na GUI voltar o port ao estado sem patch.
+    if patches:
+        for n in patches:
+            cmd += ["--patch", n]
+    elif patches is not None:
+        cmd.append("--no-patches")
     return cmd
 
 
@@ -107,7 +121,7 @@ class Hub:
     def running(self):
         return self.proc is not None and self.proc.poll() is None
 
-    def start(self, container, name, do_run):
+    def start(self, container, name, do_run, patches=None):
         if self.running():
             self.emit({"type": "log", "level": "warn", "text": "a pipeline is already running"})
             return
@@ -119,7 +133,7 @@ class Hub:
                    "title_id": meta.get("title_id"), "cover": cover, "format": meta.get("format"),
                    "container": container, "name": name})
         self.emit({"type": "stage", "stage": "extract", "status": "pending"})
-        threading.Thread(target=self._run, args=(container, name, do_run), daemon=True).start()
+        threading.Thread(target=self._run, args=(container, name, do_run, patches), daemon=True).start()
 
     def stop(self):
         if self.running():
@@ -130,8 +144,8 @@ class Hub:
             self.emit({"type": "log", "level": "warn", "text": "stopped by user"})
             self.emit({"type": "done", "ok": False, "message": "stopped"})
 
-    def _run(self, container, name, do_run):
-        cmd = pipeline_command(container, name, do_run)
+    def _run(self, container, name, do_run, patches=None):
+        cmd = pipeline_command(container, name, do_run, patches)
         self.emit({"type": "status", "text": "starting pipeline"})
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -246,6 +260,14 @@ class Handler(BaseHTTPRequestHandler):
                               json.dumps({"title": meta.get("title"),
                                           "title_id": meta.get("title_id"), "cover": cover,
                                           "format": meta.get("format")}))
+        if u.path == "/api/patches":
+            q = parse_qs(u.query)
+            name = (q.get("name") or [""])[0].strip()
+            if not name:
+                return self._send(200, "application/json",
+                                  json.dumps({"error": "sem nome de projeto", "patches": []}))
+            return self._send(200, "application/json",
+                              json.dumps(_gamepatches.catalog(_port_dir(name))))
         if u.path == "/api/deps":
             return self._send(200, "application/json", json.dumps({"items": _setup.deps_status()}))
         if u.path == "/api/events":
@@ -288,8 +310,22 @@ class Handler(BaseHTTPRequestHandler):
                               "text": "%s missing -- jump-table recovery will be "
                                       "SKIPPED and this title loses static bctr "
                                       "recovery entirely" % d["name"]})
-            HUB.start(container, name, bool(data.get("run")))
+            HUB.start(container, name, bool(data.get("run")), data.get("patches"))
             return self._send(200, "application/json", json.dumps({"ok": True}))
+        if u.path == "/api/patches":
+            name = (data.get("name") or "").strip()
+            wanted = data.get("patches") or []
+            try:
+                r = _gamepatches.apply(_port_dir(name), wanted)
+            except Exception as e:
+                return self._send(200, "application/json",
+                                  json.dumps({"ok": False, "error": str(e)}))
+            if r["needs_rebuild"]:
+                HUB.emit({"type": "log", "level": "warn",
+                          "text": "patch(es) gravado(s), mas escrevem em .text -- "
+                                  "rode o pipeline de novo para virarem codigo nativo"})
+            r["ok"] = True
+            return self._send(200, "application/json", json.dumps(r))
         if u.path == "/api/stop":
             HUB.stop()
             return self._send(200, "application/json", json.dumps({"ok": True}))
