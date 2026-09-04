@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.35.1 — "a check that shrugs is not a check" (2026-09-04)
+
+### An SDK older than v0.10.0 is now refused outright
+
+`SDK_PIN` already rejected anything but the exact tested binaries, but
+`REXAUTO_SKIP_SDK_CHECK=1` gets past it — and that flag exists for a good reason,
+so it gets used. Underneath it, an old SDK does not fail loudly. It builds a port
+that is **quietly wrong**:
+
+- `[[image_patch]]` lives in the manifest. An older `rexglue` ignores the block,
+  so every community game patch silently vanishes from the build.
+- The GPU moved out into `rexgpu-*.dll`; the generated launcher names a plugin
+  older runtimes know nothing about.
+- The codegen ranges moved from `<name>_init.h` to `<name>_pch.h`.
+
+So the floor is a separate check from the pin, and it is **not** bypassable by
+`REXAUTO_SKIP_SDK_CHECK`. It reads `rexglue --version`, compares against
+`SDK_MIN_VERSION = (0, 10, 0)`, and stops the run in 0.4 s — before the pipeline
+touches anything.
+
+**It fails closed.** The first version of this check warned and continued when it
+could not read a version, which turned out to matter: the 0.8.2 binary answers
+`--version` with an **empty stdout and exit code 0 roughly one run in three**, so
+the check passed an old SDK at random. It now retries, and refuses if it still
+cannot tell. `REXAUTO_ALLOW_UNVERIFIED_SDK=1` is the deliberate way past that one
+case; it does not let through an SDK that reported a version below the floor.
+
+Setup shows the version too — `rexglue.exe (v0.10.0)` — and an SDK below the
+floor is listed as **not found**, so the GUI blocks Recompile the same way it does
+for a missing toolchain. Finding out there beats finding out after the pipeline
+has already rewritten a game folder.
+
+### Fixed: the v2.35.0 executable rejected its own SDK
+
+`rexauto.exe` was built seven minutes before `SDK_PIN` was updated and shipped
+with the old hashes, so downloading the release, installing the bundled SDK and
+building gave `SDK MISMATCH — refusing to run`. The asset was rebuilt and
+replaced. Verified the way it should have been the first time: both assets
+downloaded from the release into a clean directory, `rexglue --version` → 0.10.0,
+full build OK, 99.2073% of code bytes and 60,146 functions — the same numbers as
+the local tree.
+
 ## 2.35.0 — "a patch nobody can reach is not a patch" (2026-09-04)
 
 **The community has published byte patches for these games for years, and a

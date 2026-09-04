@@ -577,6 +577,7 @@ def run(cmd, **kw):
 
 
 def rexglue(ctx, *xargs, env=None, capture=False):
+    verify_sdk_floor(ctx.env)  # hard minimum, deliberately not skippable
     verify_sdk_pin(ctx.env)  # gate SDK use (codegen/init); a pure game run never reaches this
     cmd = [ctx.env["rexglue"]] + list(xargs)
     e = dict(os.environ, **(env or {}))
@@ -3187,6 +3188,95 @@ def stage_run(ctx):
 
 
 # --------------------------------------------------------------------------- main
+# --- SDK version floor -------------------------------------------------------
+# Separate from SDK_PIN and, unlike it, NOT skippable. The pin says "this is the
+# exact SDK this rexauto was tested with", and REXAUTO_SKIP_SDK_CHECK=1 exists to
+# get past it during development. The floor says something stronger: rexauto now
+# *requires* v0.10.0 and cannot produce a correct port below it --
+#
+#   * [[image_patch]] lives in the manifest; an older rexglue ignores the block,
+#     so every community game patch silently vanishes from the build,
+#   * the GPU moved out into rexgpu-*.dll, and the generated launcher names a
+#     plugin that older runtimes know nothing about,
+#   * the codegen ranges moved from <name>_init.h to <name>_pch.h.
+#
+# None of those fail loudly on an old SDK -- they produce a port that builds and
+# is quietly wrong, which is the worst outcome and exactly what a skippable check
+# would let through.
+SDK_MIN_VERSION = (0, 10, 0)
+_sdk_floor_checked = False
+
+
+def _rexglue_version(path, tries=4):
+    """(major, minor, patch) reported by `rexglue --version`, or None.
+
+    Retries, because the binary is not reliable here: the 0.8.2 build returns an
+    EMPTY stdout with exit code 0 roughly one run in three. Asking once made this
+    check pass an old SDK at random, which is worse than not having it.
+
+    Reads "0.10.0" on the current SDK and "0.8.2.171-dev.g79f589e" on the old one,
+    so only the first three numbers matter.
+    """
+    for _ in range(tries):
+        try:
+            r = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", (r.stdout or "") + (r.stderr or ""))
+        if m:
+            return tuple(int(g) for g in m.groups())
+    return None
+
+
+def verify_sdk_floor(env):
+    """Refuse an SDK older than SDK_MIN_VERSION.
+
+    Deliberately ignores REXAUTO_SKIP_SDK_CHECK: that flag is for running against
+    an untested build of a SUPPORTED SDK, not against one that cannot work.
+
+    Fails CLOSED when the version cannot be read. A check that shrugs when it
+    cannot tell is not a check -- and this binary really does answer with nothing
+    sometimes. REXAUTO_ALLOW_UNVERIFIED_SDK=1 is the deliberate way past that one
+    case; it does not let an SDK through that reported a version below the floor.
+    """
+    global _sdk_floor_checked
+    if _sdk_floor_checked:
+        return
+    _sdk_floor_checked = True
+    path = env.get("rexglue")
+    if not path or not os.path.exists(path):
+        return
+    want = SDK_MIN_VERSION
+    want_s = ".".join(map(str, want))
+    got = _rexglue_version(path)
+
+    if got is None:
+        if os.environ.get("REXAUTO_ALLOW_UNVERIFIED_SDK"):
+            print("[rexauto] WARNING: no version came back from %s after several tries; "
+                  "continuing because REXAUTO_ALLOW_UNVERIFIED_SDK is set." % path)
+            return
+        raise SystemExit(
+            "[rexauto] SDK VERSION UNREADABLE - refusing to run.\n"
+            "  %s answered nothing to --version after several tries.\n"
+            "  rexauto requires rexglue %s or newer and will not guess.\n"
+            "  If you are sure this SDK is new enough, set REXAUTO_ALLOW_UNVERIFIED_SDK=1.\n"
+            % (path, want_s))
+
+    if got < want:
+        raise SystemExit(
+            "[rexauto] SDK TOO OLD - refusing to run.\n"
+            "  found   rexglue %s\n"
+            "  require rexglue %s or newer\n"
+            "    at %s\n"
+            "  rexauto needs v%s: [[image_patch]] (community game patches), the GPU\n"
+            "  plugin split, and the codegen ranges that moved to <name>_pch.h. An older\n"
+            "  SDK does not fail on these -- it builds a port that is quietly wrong, so\n"
+            "  this check is NOT bypassable by REXAUTO_SKIP_SDK_CHECK.\n"
+            "  Install the rexglue-sdk bundled with this rexauto release (Setup in the\n"
+            "  GUI, or extract it next to rexauto).\n"
+            % (".".join(map(str, got)), want_s, path, want_s))
+
+
 # --- SDK compatibility pin --------------------------------------------------
 # rexauto generates code with a specific rexglue codegen tool and links it
 # against a specific runtime. Mixing a DIFFERENT SDK build can silently produce

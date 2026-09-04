@@ -37,11 +37,39 @@ def _env():
     return rexauto.detect_env()
 
 
+def _sdk_version_status(e):
+    """(ok, detail) for the ReXGlue row.
+
+    An SDK older than the floor is reported as NOT found, so the Setup panel and
+    the /api/start guard both treat it the way they treat a missing one. Finding
+    out here beats finding out after the pipeline has already rewritten a game
+    folder. Unreadable version -> reported as found, with a note: the build-time
+    check is the one that gets to be strict about that.
+    """
+    path = e.get("rexglue")
+    if not path or not e.get("sdk"):
+        return False, (path or "not found")
+    try:
+        import rexauto as _r
+        got = _r._rexglue_version(path)
+        want = _r.SDK_MIN_VERSION
+    except Exception:
+        return True, path
+    if got is None:
+        return True, "%s  (version unreadable)" % path
+    got_s = ".".join(map(str, got))
+    if got < want:
+        return False, "%s  -- v%s is too old, need v%s or newer" % (
+            path, got_s, ".".join(map(str, want)))
+    return True, "%s  (v%s)" % (path, got_s)
+
+
 def deps_status():
     e = _env()
+    sdk_ok, sdk_detail = _sdk_version_status(e)
     return [
-        {"key": "rexglue", "name": "ReXGlue SDK", "found": bool(e["rexglue"] and e["sdk"]),
-         "detail": e["rexglue"] or "not found", "action": "rexglue",
+        {"key": "rexglue", "name": "ReXGlue SDK", "found": sdk_ok,
+         "detail": sdk_detail, "action": "rexglue",
          "note": "the recompiler + runtime (bundled — one click)"},
         {"key": "clang", "name": "LLVM / clang", "found": bool(e["clang"] and e["clangxx"]),
          "detail": e["clang"] or "not found", "action": "llvm",
