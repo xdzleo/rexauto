@@ -51,7 +51,10 @@ def deps_status():
          "note": "MSVC linker + Windows SDK (winget)"},
         {"key": "python", "name": "Python", "found": bool(e["python"]),
          "detail": e["python"] or "not found", "action": "python",
-         "note": "optional — only for the jump-table stage"},
+         "note": "runs the jump-table scripts. Without it that stage is skipped and "
+                 "the title loses static bctr recovery entirely — not optional in "
+                 "practice. A Windows Store 'python' alias does not count and is "
+                 "rejected."},
         {"key": "jt_repo", "name": "xenon-jumptables", "found": bool(e["jt_repo"]),
          "detail": e["jt_repo"] or "not found", "action": None,
          "note": "bundled — static bctr jump-table recovery; each table it resolves "
