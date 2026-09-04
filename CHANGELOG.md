@@ -1,5 +1,59 @@
 # Changelog
 
+## 2.32.0 — "measure it exactly, then close what it finds" (2026-09-03)
+
+**The coverage measurement was wrong twice; both are fixed, and the corrected
+measurement now drives a pass that closes the gaps it finds.** `rexauto`-only;
+**SDK unchanged**.
+
+### The ruler was wrong, and impossible numbers caught it
+
+- **It summed emitted instructions.** Function extents *overlap* — a chunk
+  re-emits part of its parent, a boundary override makes two functions cover the
+  same code — so the sum double-counted. Gears of War Judgment measured
+  **100.0209%**, a number that cannot exist and that would have shipped as
+  success. Coverage is now the **union** of the extents.
+- **Each extent ended at `start + 4×instructions`**, which is short whenever
+  codegen emits fewer comment lines than the routine spans. Checked against an
+  invariant the output itself provides — every `loc_` label must fall inside its
+  own function's extent — that was **466 misses out of 236,440**. Extents now
+  reach the furthest address the body names (a label, or a stored return
+  address), and the same check returns **0 of 236,419**.
+- **The denominator charged the port for alignment padding.** Inter-function
+  padding is `0x00000000`/`nop` and has no code to recompile: 112,832 bytes on
+  Judgment, three quarters of a point. Coverage of *real code* is now reported
+  beside the raw-range figure.
+
+The numbers in 2.30.0 and 2.31.0 were produced by the broken ruler and are
+overstated. Everything below is measured with the corrected one on both sides.
+
+### gap fill
+
+`covered_ranges()` is now shared between the measurement and a new `stage_build`
+pass, so the thing that measures coverage and the thing that closes it cannot
+disagree about what "covered" means. Every stretch of the code range that carries
+instructions and has no emitted C++ behind it is registered as a function start;
+codegen re-runs, and the pass loops because closing one gap exposes the next.
+Anything codegen then declines to define is dropped.
+
+Two kinds of gap are skipped because there is nothing there to recompile:
+alignment padding, and the import thunk table (two data words then
+`mtctr`/`bctr`, resolved by the runtime, not recompiled).
+
+| Gears of War Judgment | coverage of real code | functions | uncovered |
+|---|---|---|---|
+| v2.31.0 | 99.9424% | 59,761 | 8,464 B |
+| **now** | **99.9601%** | **60,137** | 5,864 B |
+
+Dante's Inferno gains the same way with no manual step — the pass ran four rounds
+by itself: **36,195 → 36,503 functions, 99.9338%** of real code. Both titles hold
+static closure at 100.0000% with zero holes.
+
+100% is not the target and never was: the raw range is ~0.8% padding. The target
+is *no gap that contains instructions*, and what remains on Judgment is 5,864
+bytes, over half of it one 2,996-byte region at `0x8297F8E4` that control flow
+never reaches.
+
 ## 2.31.0 — "a port shouldn't die on a function nobody found" (2026-09-03)
 
 **Ports ship tolerant of undiscovered functions, the pointer scan stops throwing
