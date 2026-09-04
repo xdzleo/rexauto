@@ -1032,12 +1032,16 @@ def do_codegen(ctx, env=None, level="error"):
             # for any title that never packs in place.
             if not os.environ.get("REXAUTO_NO_VPACK_FIX"):
                 _cgp.fix_vector_pack_inplace(ctx.gen, log=ctx.log)
-                # Same class, worse blast radius: 0.8.2 lowers lvebx/lvehx/lvewx
-                # as a full 16-byte lvx, so every element the instruction must
-                # PRESERVE is overwritten and the addressed one is read from the
-                # wrong offset. Its own stvewx is already correct and is the
-                # reference the rewrite mirrors. Dante's Inferno: 100 sites.
-                _cgp.fix_vector_element_loads(ctx.gen, log=ctx.log)
+                # NOTE: do NOT "fix" lvebx/lvehx/lvewx here. They look like a bug
+                # -- the SDK lowers all three as a full 16-byte lvx instead of the
+                # AltiVec single-element load -- but that is correct for this CPU.
+                # ReXGlue v0.10.0 ships element-load builders and deliberately
+                # leaves them UNDISPATCHED, with the reason in
+                # instruction_dispatch.cpp: "Xenia treats lvebx/lvehx/lvewx as
+                # 'Same as lvx' ... The Xbox 360 Xenon CPU does not implement the
+                # standard AltiVec element-load semantics for these instructions."
+                # Verified by running a patched v0.10.0 codegen over this same
+                # title: its lvewx output is byte-identical to 0.8.2's.
             ctx.t_note(gen_units_reused=_gen_restore_unchanged(ctx, snap))
             # PCH wiring must run AFTER codegen: the only earlier call site
             # (setup_extra_modules) fires before <name>_init.h exists, so its
@@ -1129,6 +1133,43 @@ def write_game_root(ctx):
                 f.write(os.path.abspath(ctx.game) + "\n")
     except OSError as ex:
         ctx.log("could not write game_root.txt sidecar (%s)" % ex)
+    write_play_launcher(ctx)
+
+
+def write_play_launcher(ctx):
+    """Write `play <name>.cmd` next to the exe: the same launch, with the
+    dispatcher in TOLERANT mode.
+
+    By default an indirect call to a function the static scan never discovered is
+    REX_FATAL -- the process dies, and every such address has to be found by the
+    run-heal one launch-and-crash at a time. Many of those targets are
+    runtime-computed vtable entries that no static analysis can reach, so dying
+    on them buys nothing: hells-gate-recomp's ReXGlue patch replaces that
+    REX_FATAL with a log-and-return in three lines, and it is why their Dante's
+    Inferno reaches gameplay.
+
+    Our own runtime already has the behaviour behind REX_HEAL_DISCOVER, used only
+    while healing. Measured on Dante's Inferno, same exe, same build: strict dies
+    at 20 s on 0x82908134; tolerant runs past 120 s with zero fatals.
+
+    The exe keeps its strict default, because the heal needs a launch that stops
+    at the first missing function to find it. This launcher is the one to hand a
+    player. REXAUTO_NO_PLAY_LAUNCHER=1 skips writing it."""
+    if os.environ.get("REXAUTO_NO_PLAY_LAUNCHER"):
+        return
+    try:
+        path = os.path.join(ctx.builddir, "play %s.cmd" % ctx.name)
+        with open(path, "w", encoding="utf-8", newline="\r\n") as f:
+            f.write(
+                "@echo off\r\n"
+                "rem Written by rexauto. Runs %s with the dispatcher tolerant of\r\n"
+                "rem functions the static scan never discovered: an unresolved indirect\r\n"
+                "rem call is logged and returns instead of killing the process.\r\n"
+                "rem Run the .exe directly for the strict behaviour the heal needs.\r\n"
+                "set REX_HEAL_DISCOVER=1\r\n"
+                'start "" "%%~dp0%s.exe" %%*\r\n' % (ctx.name, ctx.name))
+    except OSError as ex:
+        ctx.log("could not write the play launcher (%s)" % ex)
 
 
 def _game_icon_png(ctx):
@@ -2042,14 +2083,26 @@ def _pointer_scan_register(ctx):
         cs = int(re.search(r"REX_CODE_SIZE 0x([0-9A-Fa-f]+)", h).group(1), 16)
     except Exception:
         return 0
-    new = _heal.data_pointer_scan(image, ctx.gen, ib, cb, cs)
-    if not new:
-        return []
-    known = set(_heal.load_overrides_full(ctx.functions))
+    new, lab = _heal.data_pointer_scan(image, ctx.gen, ib, cb, cs)
+    full = _heal.load_overrides_full(ctx.functions)
+    known = set(full)
     new = [a for a in new if a not in known]
+    # A pointer whose target is only a `loc_` inside another function is still an
+    # entry the game takes the address of. Registering it as a function would
+    # split the owner, so it is cured as a CHUNK -- which is how ReXGlue v0.10.0
+    # ends up with 51 functions on Dante's Inferno that we did not have, 40 of
+    # them sitting in the data as plain pointers we were throwing away.
+    chunked = 0
+    for a, owner in sorted(lab.items()):
+        if a in known:
+            continue
+        full[a] = {"end": None, "parent": owner, "size": None, "name": None}
+        chunked += 1
+    if chunked:
+        _heal.write_overrides_full(ctx.functions, full)
     if new:
         _heal.register_functions(new, ctx.functions)
-    return new
+    return new + sorted(a for a in lab if a not in known)
 
 
 def stage_build(ctx):
@@ -3051,7 +3104,14 @@ def main():
         ctx.timing_run_end(selected)
     ctx.log("done. project: %s" % ctx.port)
     if not want_run and os.path.exists(ctx.exe):
-        ctx.log('to play:  "%s" --game_data_root="%s"' % (ctx.exe, ctx.game))
+        launcher = os.path.join(ctx.builddir, "play %s.cmd" % ctx.name)
+        if os.path.exists(launcher):
+            # the tolerant launch is the one to hand a player; the bare exe keeps
+            # the strict dispatcher the heal needs to find its next target
+            ctx.log('to play:  "%s"' % launcher)
+            ctx.log('  strict: "%s" --game_data_root="%s"' % (ctx.exe, ctx.game))
+        else:
+            ctx.log('to play:  "%s" --game_data_root="%s"' % (ctx.exe, ctx.game))
 
 
 if __name__ == "__main__":

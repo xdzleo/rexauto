@@ -235,6 +235,37 @@ def _emitted_symbols(gen_dir):
     return defined, labels
 
 
+def label_owners(gen_dir):
+    """loc_ label address -> the function that emits it.
+
+    A data pointer whose target is only a `loc_` inside somebody else's body is
+    still a real entry point: the game takes its address and calls through it.
+    Skipping those is what made our pointer scan miss 40 of the 51 functions
+    ReXGlue v0.10.0 finds on Dante's Inferno. They must not be registered as
+    plain functions (that splits the owner), so the owner is recorded here and
+    they are cured as chunks instead."""
+    import os as _os
+    owners = {}
+    if not _os.path.isdir(gen_dir):
+        return owners
+    for fn in sorted(_os.listdir(gen_dir)):
+        if not fn.endswith(".cpp"):
+            continue
+        cur = None
+        with open(_os.path.join(gen_dir, fn), "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                m = DEFRE.search(line)
+                if m:
+                    cur = int(m.group(1), 16)
+                    continue
+                if cur is None:
+                    continue
+                lm = re.match(r"^loc_([0-9A-Fa-f]{8}):", line)
+                if lm:
+                    owners.setdefault(int(lm.group(1), 16), cur)
+    return owners
+
+
 def data_pointer_scan(image_path, gen_dir, image_base, code_base, code_size):
     """Function pointers the static scan missed, read out of the image's DATA.
 
@@ -258,7 +289,9 @@ def data_pointer_scan(image_path, gen_dir, image_base, code_base, code_size):
     that address is a LANDING, and registering it as a function splits the
     routine -- the failure that made Judgment die 0.7s into every launch.
 
-    Returns sorted new addresses (nothing already emitted as a function)."""
+    Returns (new_functions, label_hits) -- the second being {addr: owner} for
+    targets that are only a `loc_` inside another function, which are entries the
+    game takes the address of and must be cured as CHUNKS, never as functions."""
     import array
     import sys as _sys
     import os as _os
@@ -274,7 +307,8 @@ def data_pointer_scan(image_path, gen_dir, image_base, code_base, code_size):
     lo_w = (code_base - image_base) // 4
     hi_w = (code_end - image_base) // 4
     defined, labels = _emitted_symbols(gen_dir)
-    out = set()
+    owners = label_owners(gen_dir)
+    out, lab = set(), {}
     for i, v in enumerate(words):
         if lo_w <= i < hi_w:                  # skip the executable section
             continue
@@ -282,7 +316,12 @@ def data_pointer_scan(image_path, gen_dir, image_base, code_base, code_size):
             continue
         if not (code_base <= v < code_end):
             continue
-        if v in defined or v in labels:
+        if v in defined:
+            continue
+        if v in labels:
+            o = owners.get(v)
+            if o is not None and o != v:
+                lab[v] = o
             continue
         j = (v - image_base) // 4
         if j >= len(words):
@@ -291,7 +330,7 @@ def data_pointer_scan(image_path, gen_dir, image_base, code_base, code_size):
         if t == 0 or t == 0xFFFFFFFF:         # padding, not code
             continue
         out.add(v)
-    return sorted(out)
+    return sorted(out), lab
 
 
 def load_forced(path):
