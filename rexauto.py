@@ -3182,6 +3182,56 @@ def publish_gabarito(ctx):
     ctx.log("gabarito: wrote gabaritos/%s.toml (%d cures) — commit it to share" % (key[:12], n))
 
 
+def preflight(env, args=None):
+    """Refuse to start a run that cannot finish, and say what is missing.
+
+    Before this, a machine without a toolchain got through extract, xctd, init
+    and setjmp -- minutes of work, and on a title with transparent compression a
+    rewritten game folder -- only to die at the build. And a machine without a
+    usable Python got a whole port built with NO static jump-table recovery,
+    announced by one skipped line nobody reads.
+
+    Two tiers, because they fail differently:
+      BLOCKING  nothing can be produced without these -> stop now.
+      DEGRADING the port still builds, but measurably worse -> say so, loudly,
+                once, at the point where it can still be fixed.
+    """
+    blocking = [("rexglue.exe", env.get("rexglue"),
+                 "Setup -> ReXGlue SDK (one click), or set REXGLUE"),
+                ("ReXGlue SDK (headers/libs)", env.get("sdk"),
+                 "Setup -> ReXGlue SDK (one click), or set REXSDK_DIR"),
+                ("clang", env.get("clang"), "Setup -> LLVM / clang (winget)"),
+                ("clang++", env.get("clangxx"), "Setup -> LLVM / clang (winget)"),
+                ("MSVC linker + Windows SDK", env.get("vcvars"),
+                 "Setup -> VS Build Tools (winget)")]
+    missing = [(n, h) for n, v, h in blocking if not v]
+    if missing:
+        lines = ["rexauto cannot build this title -- %d required tool(s) missing:"
+                 % len(missing)]
+        lines += ["  - %-26s %s" % (n, h) for n, h in missing]
+        lines.append("Open Setup (top-right) and install them, then run again. "
+                     "Nothing has been written yet.")
+        raise SystemExit("\n".join(lines))
+    # degrading: the build works, the recompilation is worse
+    if not (args and getattr(args, "no_jumptables", False)):
+        why = []
+        if not env.get("python"):
+            why.append("no usable Python (a Windows Store 'python' alias does not "
+                       "count) -- Setup -> Python")
+        if not env.get("idat"):
+            why.append("no IDA (commercial; install it and re-run to recover more)")
+        if not env.get("jt_repo"):
+            why.append("no xenon-jumptables (it ships inside rexauto; a broken "
+                       "install would explain this)")
+        if why:
+            print("[rexauto] WARNING: jump-table recovery will be SKIPPED -- this "
+                  "title loses static bctr recovery entirely")
+            for w in why:
+                print("[rexauto]          %s" % w)
+            print("[rexauto]          (on Gears of War Judgment that pass found 109 "
+                  "tables / 3,142 targets)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -3207,8 +3257,7 @@ def main():
     ctx.log("tools: rexglue=%s sdk=%s clang=%s ida=%s vcvars=%s"
             % (bool(env["rexglue"]), bool(env["sdk"]), bool(env["clang"]),
                bool(env["idat"]), bool(env["vcvars"])))
-    if not env["rexglue"]:
-        raise SystemExit("rexglue.exe not found (set REXGLUE or build the ReXGlue SDK).")
+    preflight(env, args)
 
     order = STAGES[:]
     if args.no_jumptables:

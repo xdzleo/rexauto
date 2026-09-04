@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.33.0 — "don't start what can't finish" (2026-09-03)
+
+**A run with missing tools now refuses to start, and a run that will silently
+produce a worse port says so up front.** `rexauto`-only; **SDK unchanged**.
+
+### Preflight
+
+Before this, a machine with no toolchain got through extract, xctd, init and
+setjmp — minutes of work, and on a title with transparent compression a
+**rewritten game folder** — only to die at the build. Two tiers now run before
+anything is written, in the CLI and behind the GUI's Start button:
+
+- **Blocking** — `rexglue.exe`, the SDK headers/libs, clang, clang++, the MSVC
+  linker. Nothing can be produced without them, so the run stops and names each
+  one with where to get it. Nothing is written.
+- **Degrading** — Python and IDA. The port still builds, but jump-table recovery
+  is skipped and the title loses static `bctr` recovery entirely. That used to be
+  one skipped line in a log; it is now a warning at the point where it can still
+  be fixed.
+
+`Setup` installs the blocking three (SDK one-click, LLVM and Build Tools via
+winget) and Python; **Install all** does the lot. IDA is commercial and stays
+status-only.
+
+### What the silence was costing
+
+Auditing the fleet after 2.32.3 fixed Python detection:
+
+| port | jump tables |
+|---|---|
+| gears_of_war_judgment | 109 |
+| dante_s_inferno | **0** |
+| bully | **0** |
+| spider_man_dimensions | **0** |
+
+Three of four had been built with **no** static jump-table recovery, each
+recorded only as `{"skipped": "extract-funcs-fail"}`. Running the pass on Dante's
+Inferno for the first time: **220 tables, 5,999 targets**.
+
+That gain does not move byte coverage and is not claimed to — it moves indirect
+targets from "resolved when the guest happens to get there" to "resolved at
+codegen". It is the difference the run-heal cannot make up, and it is why
+Judgment, which had its tables from the start, survived a 150 s launch while
+Dante did not.
+
+### Also
+
+`Setup` no longer calls Python **optional**. It runs the jump-table scripts, and
+the row now says what is lost without it and that a Windows Store alias does not
+count.
+
 ## 2.32.3 — "the Python that was not a Python" (2026-09-03)
 
 **Every title on a machine with the Windows Store Python alias has been silently

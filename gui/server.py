@@ -265,6 +265,29 @@ class Handler(BaseHTTPRequestHandler):
                 meta = _extract.read_package_meta(container)
                 name = _extract.project_name_from_title(
                     meta.get("title") or _extract.title_from_filename(container))
+            # Refuse to start a run that cannot finish. Without this the UI
+            # happily ran extract/xctd/init/setjmp on a machine with no
+            # toolchain -- minutes of work, and on a title with transparent
+            # compression a rewritten game folder -- before dying at the build.
+            blocked = [d for d in _setup.deps_status()
+                       if not d["found"] and d["key"] in
+                       ("rexglue", "clang", "vcvars")]
+            if blocked:
+                for d in blocked:
+                    HUB.emit({"type": "log", "level": "err",
+                              "text": "missing: %s -- %s" % (d["name"], d["note"])})
+                HUB.emit({"type": "log", "level": "err",
+                          "text": "not starting. Open Setup and install the %d "
+                                  "missing tool(s); nothing has been written."
+                                  % len(blocked)})
+                return self._send(200, "application/json", json.dumps(
+                    {"ok": False, "missing": [d["key"] for d in blocked]}))
+            for d in _setup.deps_status():
+                if not d["found"] and d["key"] in ("python", "idat"):
+                    HUB.emit({"type": "log", "level": "warn",
+                              "text": "%s missing -- jump-table recovery will be "
+                                      "SKIPPED and this title loses static bctr "
+                                      "recovery entirely" % d["name"]})
             HUB.start(container, name, bool(data.get("run")))
             return self._send(200, "application/json", json.dumps({"ok": True}))
         if u.path == "/api/stop":
