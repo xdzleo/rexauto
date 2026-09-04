@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.32.3 — "the Python that was not a Python" (2026-09-03)
+
+**Every title on a machine with the Windows Store Python alias has been silently
+losing static jump-table recovery.** `rexauto`-only; **SDK unchanged**.
+
+Bully - Scholarship Edition logged:
+
+```
+extract_funcs failed -> skipping jump tables
+```
+
+`extract_funcs.py` was fine — run by hand against the same port it extracts
+**41,371 functions** and exits 0. What was not fine was the interpreter running
+it. `shutil.which("python")` returns
+
+```
+%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe
+  -> AppInstallerPythonRedirector.exe
+```
+
+which is not an interpreter at all. It is the Store's App-execution alias: it
+prints *"Python was not found…"* and exits **9009**. It sits on PATH ahead of a
+real install, so `detect_env()` picked it, the Setup panel reported **Python:
+found**, and the jumptables stage failed on every title with a message that named
+nothing.
+
+This is not a Bully problem. It costs **every title** its static `bctr` recovery —
+the pass that on Gears of War Judgment found 109 tables and 3,142 case targets.
+Dante's Inferno had the same `extract-funcs-fail` recorded in its state and it was
+attributed to something else.
+
+**Every Python candidate is now run before it is accepted** (`python -c "import
+sys; print(sys.version_info[0])"`, result cached). The stub is rejected and the
+frozen build resolves `C:\Program Files\Python310\python.exe`.
+
+**The message now says why**: exit code, which interpreter was used, the last line
+of its output, and that static recovery is lost for that title. The silence is
+what hid this.
+
 ## 2.32.2 — "the xctd decoder was never in the build" (2026-09-03)
 
 **The XCTD stage has never worked in a packaged rexauto.** `rexauto`-only; **SDK

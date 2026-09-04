@@ -67,6 +67,38 @@ def newest_glob(*patterns):
     return sorted(hits)[-1] if hits else None
 
 
+_PY_OK_CACHE = {}
+
+
+def _python_runs(path):
+    """True if `path` is really a Python interpreter, proven by running it.
+
+    Not a formality on Windows: the App-execution-alias stub at
+    %LOCALAPPDATA%\\Microsoft\\WindowsApps\\python.exe exists, is on PATH ahead of
+    a real install, and answers every launch with "Python was not found..." and
+    exit 9009."""
+    if not path:
+        return False
+    if path in _PY_OK_CACHE:
+        return _PY_OK_CACHE[path]
+    ok = False
+    try:
+        r = subprocess.run([path, "-c", "import sys; print(sys.version_info[0])"],
+                           capture_output=True, text=True, timeout=20)
+        ok = r.returncode == 0 and (r.stdout or "").strip().isdigit()
+    except Exception:
+        ok = False
+    _PY_OK_CACHE[path] = ok
+    return ok
+
+
+def _first_working_python(*candidates):
+    for c in candidates:
+        if c and os.path.exists(c) and _python_runs(c):
+            return c
+    return None
+
+
 def detect_env():
     pf = os.environ.get("ProgramFiles", r"C:\Program Files")
     pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
@@ -104,11 +136,22 @@ def detect_env():
             os.path.join(getattr(sys, "_MEIPASS", ""), "xenon-jumptables"),
             os.path.join(HERE, "vendor", "xenon-jumptables"),
             r"C:\xenon-jumptables") if p and os.path.basename(p)]),
-        # a real python interpreter for the jump-table scripts (sys.executable is
-        # the frozen .exe when packaged, which can't run .py files)
-        "python": (None if getattr(sys, "frozen", False) else sys.executable)
-        or e("PYTHON") or shutil.which("python") or shutil.which("python3")
-        or newest_glob(r"C:\Program Files\Python3*\python.exe", r"C:\Python3*\python.exe"),
+        # A real python interpreter for the jump-table scripts (sys.executable is
+        # the frozen .exe when packaged, which can't run .py files).
+        #
+        # Every candidate is RUN before it is accepted. Windows ships an
+        # "App execution alias" at %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe
+        # that is not an interpreter at all -- it is a redirector that prints
+        # "Python was not found..." and exits 9009 -- and shutil.which() finds it
+        # first on a machine with a real Python installed elsewhere. Accepting it
+        # made the frozen build report Python as present and then fail the
+        # jumptables stage with a bare "extract_funcs failed -> skipping jump
+        # tables", losing static bctr recovery on every title, silently.
+        "python": _first_working_python(
+            (None if getattr(sys, "frozen", False) else sys.executable),
+            e("PYTHON"), shutil.which("python"), shutil.which("python3"),
+            newest_glob(r"C:\Program Files\Python3*\python.exe",
+                        r"C:\Python3*\python.exe")),
     }
 
 
@@ -783,7 +826,13 @@ def stage_jumptables(ctx):
     rf = run([ctx.env["python"], os.path.join(ctx.env["jt_repo"], "src", "extract_funcs.py"),
               ctx.gen, "-o", funcs])
     if rf.returncode != 0 or not os.path.exists(funcs):
-        ctx.log("extract_funcs failed -> skipping jump tables")
+        # Say WHY. A bare "extract_funcs failed" is how a broken python
+        # interpreter cost every title its static bctr recovery without anyone
+        # being able to tell from the log what had gone wrong.
+        why = ((rf.stderr or rf.stdout or "").strip().splitlines() or ["no output"])[-1]
+        ctx.log("extract_funcs failed (rc=%s, python=%s): %s"
+                % (rf.returncode, ctx.env["python"], why[:200]))
+        ctx.log("  -> skipping jump tables (static bctr recovery is LOST for this title)")
         return ctx.mark("jumptables", {"skipped": "extract-funcs-fail"})
     cfg = os.path.join(ctx.work, "%s_jt.json" % ctx.name)
     out_json = os.path.join(ctx.work, "jumptables.json")
