@@ -1,5 +1,75 @@
 # Changelog
 
+## 2.30.0 — "the pointers were in the file all along" (2026-09-03)
+
+**The recompiler now finds the function pointers sitting in the game's data, and
+coverage is reported the way decomp projects report it.** `rexauto`-only; **SDK
+unchanged** (`SDK_PIN` identical to 2.27.0).
+
+### Recompilation, measured by code bytes
+
+`closure.py`'s headline is now **byte coverage** — the share of the image's code
+range with emitted C++ behind it. This is the convention the decomp community
+settled on (decomp.dev / frogress report matched bytes over total code bytes and
+call it the honest metric) and the reason carries over unchanged: counting
+*functions* flatters, because the easy ones are small and the hard ones are big.
+
+It is measured, not estimated: codegen writes one `// <mnemonic ...>` comment per
+translated PowerPC instruction and every instruction is 4 bytes, so 4× that count
+is exactly the code it translated. Denominator is `REX_CODE_SIZE` from the
+generated header.
+
+### Function pointers, read out of the image instead of found by crashing
+
+A vtable entry, a callback array or a handler table is a dword in a **data**
+section holding a code address. The recompiler's scan follows control flow, so it
+never sees them, and the run-heal then discovers them one launch-and-crash at a
+time. On Gears of War: Judgment **35 of its 46 cures were sitting in the image in
+plain sight**.
+
+The idea is [hells-gate-recomp](https://github.com/florinp93/hells-gate-recomp)'s
+`dataSectionFunctionPointerScan`, which patches ReXGlue itself. We run on a
+prebuilt 0.8.2 SDK and their patch targets 0.10.0, so the technique is
+reimplemented on the rexauto side: scan the image, register into `functions.toml`
+before the first build. Same filters — read only outside the code range (scanning
+code too is what makes it noisy: 1,878 spurious candidates whole-image against
+315 data-only), 4-byte aligned, non-null, target must land in code, target's own
+first instruction must not be padding.
+
+Two guards are ours, and both were earned:
+
+- **Drop anything already emitted as a `loc_` label.** Inside a function body that
+  address is a landing; registering it as a function splits the routine — the
+  failure that made Judgment die 0.7 s into every launch.
+- **Keep only what codegen actually defined.** A pointer can land where codegen
+  declines to translate; the import thunk table is full of 16-byte stubs that look
+  exactly like code pointers, and the first run of this produced 281 registrations
+  and a link full of `undefined symbol: sub_8309B8C4`. ReXGlue's version skips
+  that range with `importThunkTableStart()`; from outside the SDK there is no such
+  accessor, so the emitted output is checked instead and the strays are dropped.
+  15 of 281 on Judgment, 15 on Dante's Inferno.
+
+The scan runs **before** the unresolved-branch cure, not after: registering a
+function can expose a new unresolved branch, and the trap loop is what closes
+those. Reversed, Judgment came out with 17 fresh holes and static closure fell off
+100% — a real regression, caught and fixed before shipping.
+
+### Measured
+
+| | before | after |
+|---|---|---|
+| Gears of War: Judgment | 99.4313% | **99.6582%** |
+| Dante's Inferno | 99.2619% | **99.5582%** |
+
+Judgment: static closure stays 100.0000% (0 holes), functions 59,453 → 59,726, and
+the port **survived a 150 s launch with zero fatals** — against a 0.7 s crash
+before 2.28.1. Dante's Inferno: 0 holes, 35,927 → 36,134 functions; it still stops
+on the ordinary unregistered-function class it was already stopping on at 12–20 s
+before this change, so the run-heal still has work there.
+
+`REXAUTO_NO_PTRSCAN=1` disables the scan — the regression gate compares against
+baselines that predate it, and this deliberately changes generated code.
+
 ## 2.29.0 — "the pass nobody ran" (2026-09-03)
 
 **xenon-jumptables ships inside rexauto, and coverage is measured instead of

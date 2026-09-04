@@ -1025,6 +1025,19 @@ def do_codegen(ctx, env=None, level="error"):
             # FOV / ultrawide-frustum render hooks) once codegen has converged and
             # before compile. No <name>_codegen_patches.toml -> no-op (byte-identical).
             _cgp.apply(ctx, log=ctx.log)
+            # Built-in correctness repair, not a per-title patch: SDK 0.8.2 lowers
+            # an in-place vpkuwus/vpkuhus so its narrow writes clobber the wide
+            # reads of the same register. Fixed upstream in 0.10.0; we ship a
+            # prebuilt 0.8.2, so it is repaired in the emitted C++. Byte-identical
+            # for any title that never packs in place.
+            if not os.environ.get("REXAUTO_NO_VPACK_FIX"):
+                _cgp.fix_vector_pack_inplace(ctx.gen, log=ctx.log)
+                # Same class, worse blast radius: 0.8.2 lowers lvebx/lvehx/lvewx
+                # as a full 16-byte lvx, so every element the instruction must
+                # PRESERVE is overwritten and the addressed one is read from the
+                # wrong offset. Its own stvewx is already correct and is the
+                # reference the rewrite mirrors. Dante's Inferno: 100 sites.
+                _cgp.fix_vector_element_loads(ctx.gen, log=ctx.log)
             ctx.t_note(gen_units_reused=_gen_restore_unchanged(ctx, snap))
             # PCH wiring must run AFTER codegen: the only earlier call site
             # (setup_extra_modules) fires before <name>_init.h exists, so its
@@ -2006,6 +2019,39 @@ def stage_deepextract(ctx, gen_current=False):
                                     "accepted": len(accepted), "landings": n_land})
 
 
+def _pointer_scan_register(ctx):
+    """Register the function pointers sitting in the image's data sections.
+
+    Reads the image + ranges the pipeline already has (<work>/<name>_image.bin,
+    written by the setjmp/jumptables stages, and REX_IMAGE_BASE / REX_CODE_BASE /
+    REX_CODE_SIZE from the generated header). No-op and silent when either is
+    absent, so a port that never dumped an image is unaffected.
+
+    Only addresses that are neither an emitted function nor an emitted `loc_`
+    label are added, so this can never split a routine -- registering an interior
+    landing as a function is what made Judgment die 0.7s into every launch.
+    Returns the addresses newly written to functions.toml."""
+    image = os.path.join(ctx.work, "%s_image.bin" % ctx.name)
+    hdr = os.path.join(ctx.gen, ctx.name + "_init.h")
+    if not (os.path.exists(image) and os.path.exists(hdr)):
+        return 0
+    try:
+        h = _heal._read_text(hdr)
+        ib = int(re.search(r"REX_IMAGE_BASE 0x([0-9A-Fa-f]+)", h).group(1), 16)
+        cb = int(re.search(r"REX_CODE_BASE 0x([0-9A-Fa-f]+)", h).group(1), 16)
+        cs = int(re.search(r"REX_CODE_SIZE 0x([0-9A-Fa-f]+)", h).group(1), 16)
+    except Exception:
+        return 0
+    new = _heal.data_pointer_scan(image, ctx.gen, ib, cb, cs)
+    if not new:
+        return []
+    known = set(_heal.load_overrides_full(ctx.functions))
+    new = [a for a in new if a not in known]
+    if new:
+        _heal.register_functions(new, ctx.functions)
+    return new
+
+
 def stage_build(ctx):
     miss = [k for k in ("vcvars", "clang", "clangxx", "sdk") if not ctx.env[k]]
     if miss:
@@ -2024,6 +2070,43 @@ def stage_build(ctx):
             skip_codegen = False  # OOM retry: generated/ is already current
         else:
             do_codegen(ctx)
+            # Data-section function-pointer scan. vtable entries, callback arrays
+            # and handler tables are dwords in DATA holding code addresses; the
+            # recompiler's scan follows control flow and never sees them, so the
+            # run-heal finds them one launch-and-crash at a time. Read them out of
+            # the image instead -- on Judgment 35 of its 46 cures are in there.
+            # Runs BEFORE the trap loop below, because registering a function can
+            # expose new unresolved branches and the trap loop is what cures those;
+            # with the order reversed Judgment came out of the scan with 17 fresh
+            # holes and static closure fell off 100%.
+            # REXAUTO_NO_PTRSCAN=1 disables it (the regression gate wants codegen
+            # held byte-identical to a baseline that predates this).
+            if not os.environ.get("REXAUTO_NO_PTRSCAN"):
+                _added = _pointer_scan_register(ctx)
+                if _added:
+                    ctx.log("  pointer scan: +%d function(s) found in the image's "
+                            "data sections; re-running codegen" % len(_added))
+                    do_codegen(ctx)
+                    # Keep only what codegen actually DEFINED. A pointer can land
+                    # in a region codegen declines to translate -- the import
+                    # thunk table is full of 16-byte stubs that look exactly like
+                    # code pointers -- and those become `undefined symbol:
+                    # sub_XXXXXXXX` at link. ReXGlue's own version of this scan
+                    # skips the thunk range via importThunkTableStart(); we have
+                    # no such accessor from out here, so verify against the
+                    # emitted output instead, which covers that case and every
+                    # other one it cannot name.
+                    _defined, _ = _heal._emitted_symbols(ctx.gen)
+                    _bad = [a for a in _added if a not in _defined]
+                    if _bad:
+                        _ov = _heal.load_overrides_full(ctx.functions)
+                        for a in _bad:
+                            _ov.pop(a, None)
+                        _heal.write_overrides_full(ctx.functions, _ov)
+                        ctx.log("  pointer scan: %d of them produced no definition "
+                                "(thunks / untranslated regions) -> dropped, "
+                                "re-running codegen" % len(_bad))
+                        do_codegen(ctx)
             # Static pre-heal: every unresolved call/branch trap is a literal
             # REX_FATAL(...) codegen just wrote into generated/. Cure the whole set
             # here -- before the first build -- instead of paying one
@@ -2609,7 +2692,7 @@ def stage_runheal(ctx):
                                         "confirmed_seconds": confirm_seconds})
         n = 0
         if addrs:
-            n_reg, n_seed = _heal.register_or_seed(addrs, ctx.functions, ctx.forced, ctx.switches)
+            n_reg, n_seed = _heal.register_or_seed(addrs, ctx.functions, ctx.forced, ctx.switches, called=True)
             if n_seed:
                 _heal.ensure_manifest_include(ctx.manifest, os.path.basename(ctx.forced))
             n = n_reg + n_seed
@@ -2618,7 +2701,7 @@ def stage_runheal(ctx):
         # Targets owned by an extra module: cure in ITS functions.toml and re-codegen
         # that module (its objects relink into the same exe in the shared rebuild below).
         for mc, ma in mod_hits:
-            mr, ms = _heal.register_or_seed(ma, mc.functions, mc.forced, mc.switches)
+            mr, ms = _heal.register_or_seed(ma, mc.functions, mc.forced, mc.switches, called=True)
             if ms:
                 _heal.ensure_manifest_include(mc.manifest, os.path.basename(mc.forced))
             n += mr + ms

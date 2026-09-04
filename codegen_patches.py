@@ -148,3 +148,136 @@ def apply(ctx, log=None):
             if log:
                 log("  codegen-patch: applied %s -> %s" % (p.get("name"), r))
     return applied
+
+
+# --- built-in correctness fix: in-place VMX pack aliasing --------------------
+# Not a per-title patch. ReXGlue lowers vpkuwus/vpkuhus as an element-by-element
+# loop that writes the destination's NARROW element array while still reading the
+# source's WIDE one. Both views alias the same 128-bit register, so when the
+# destination is also a source -- `vpkuwus128 v63,v61,v63` -- each write corrupts
+# the read on the next line:
+#
+#   ctx.v63.u16[7] = ctx.v61.u32[3] ...   <- writes bytes 14-15 of v63
+#   ctx.v63.u16[3] = ctx.v63.u32[3] ...   <- reads bytes 12-15 of v63
+#
+# hells-gate-recomp traced Dante's Inferno's VP6/Bink FMV corruption to exactly
+# this and fixed it in the SDK (v0.10.0, builders/vector.cpp). We are on a
+# prebuilt 0.8.2 with no source, so the same defect is repaired here in the
+# emitted C++: snapshot both source registers, then pack out of the snapshots.
+# Blocks whose destination is NOT one of the sources are left untouched, byte for
+# byte, so a title that never packs in place is unaffected.
+_PACK_HDR = re.compile(
+    r"^\t// (vpk[a-z]+)(?:128)? v(\d+),v(\d+),v(\d+)\s*$")
+_PACK_ROW = re.compile(
+    r"^\tctx\.v(\d+)\.(u\d+)\[(\d+)\] = ctx\.v(\d+)\.(u\d+)\[(\d+)\] ")
+
+
+def fix_vector_pack_inplace(gen_dir, log=None):
+    """Rewrite in-place vpk* blocks to read from snapshots. Returns sites fixed."""
+    fixed = 0
+    for fp in sorted(glob.glob(os.path.join(gen_dir, "*.cpp"))):
+        with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.read().split("\n")
+        out, i, changed = [], 0, False
+        while i < len(lines):
+            m = _PACK_HDR.match(lines[i])
+            if not m:
+                out.append(lines[i])
+                i += 1
+                continue
+            d, a, b = m.group(2), m.group(3), m.group(4)
+            j = i + 1
+            body = []
+            while j < len(lines) and _PACK_ROW.match(lines[j]) \
+                    and _PACK_ROW.match(lines[j]).group(1) == d:
+                body.append(lines[j])
+                j += 1
+            # only an in-place block needs repair; anything else stays identical
+            if not body or (d != a and d != b):
+                out.append(lines[i])
+                i += 1
+                continue
+            out.append(lines[i])
+            out.append("\t{  // rexauto: snapshot sources -- dest aliases a source")
+            out.append("\t\tconst auto _rex_pa = ctx.v%s; const auto _rex_pb = ctx.v%s;" % (a, b))
+            for row in body:
+                # rewrite only the SOURCE reads (right of '='), never the dest write
+                lhs, _, rhs = row.partition(" = ")
+                rhs = rhs.replace("ctx.v%s." % a, "_rex_pa.").replace("ctx.v%s." % b, "_rex_pb.")
+                out.append("\t" + lhs.lstrip("\t") + " = " + rhs)
+            out.append("\t}")
+            fixed += 1
+            changed = True
+            i = j
+        if changed:
+            with open(fp, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(out))
+    if fixed and log:
+        log("  codegen fix: %d in-place VMX pack site(s) rewritten to snapshot "
+            "their sources (SDK 0.8.2 aliasing bug)" % fixed)
+    return fixed
+
+
+# --- built-in correctness fix: vector element loads ------------------------
+# lvebx / lvehx / lvewx load ONE element of vD from memory and leave the other
+# elements untouched. SDK 0.8.2 lowers all three as a full 16-byte `lvx`: it
+# masks the address to 16 bytes and byte-reverses a whole vector over the
+# destination, so 15/14/12 bytes that must be preserved are clobbered and the
+# addressed element is read from the wrong offset.
+#
+# Its own STORE counterparts are already right and are the reference used here:
+#     stvewx -> ea = (...) & ~0x3;  REX_STORE_U32(ea, vD.u32[3 - ((ea & 0xF) >> 2)]);
+# so the load is simply that mirrored. hells-gate-recomp added the same three
+# builders to ReXGlue 0.10.0 with the identical index arithmetic.
+#
+# Dante's Inferno emits 96 lvewx + 4 lvehx; Gears of War Judgment emits no lvewx,
+# which is why the defect never showed there.
+_VEC_ELEM = {
+    "lvebx": ("~0x0", "u8", "15 - (ea & 0xF)", "REX_LOAD_U8"),
+    "lvehx": ("~0x1", "u16", "7 - ((ea & 0xF) >> 1)", "REX_LOAD_U16"),
+    "lvewx": ("~0x3", "u32", "3 - ((ea & 0xF) >> 2)", "REX_LOAD_U32"),
+}
+_VEC_ELEM_HDR = re.compile(r"^\t// (lveb|lveh|lvew)x(?:128)? v(\d+),")
+_VEC_ELEM_EA = re.compile(r"^\tea = (.*) & ~0xF;$")
+_VEC_ELEM_BAD = re.compile(
+    r"^\tsimde_mm_store_si128\(\(simde__m128i\*\)ctx\.v(\d+)\.u8, "
+    r"simde_mm_shuffle_epi8\(.*VectorMaskL.*\)\);$")
+
+
+def fix_vector_element_loads(gen_dir, log=None):
+    """Rewrite lvebx/lvehx/lvewx from a full-vector load to a single-element
+    load. Returns the number of sites fixed."""
+    fixed = 0
+    for fp in sorted(glob.glob(os.path.join(gen_dir, "*.cpp"))):
+        with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.read().split("\n")
+        out, i, changed = [], 0, False
+        while i < len(lines):
+            h = _VEC_ELEM_HDR.match(lines[i])
+            if not (h and i + 2 < len(lines)):
+                out.append(lines[i])
+                i += 1
+                continue
+            ea_m = _VEC_ELEM_EA.match(lines[i + 1])
+            bad_m = _VEC_ELEM_BAD.match(lines[i + 2])
+            # only rewrite the exact full-vector lowering, and only when the
+            # clobbered register is the instruction's own destination
+            if not (ea_m and bad_m and bad_m.group(1) == h.group(2)):
+                out.append(lines[i])
+                i += 1
+                continue
+            mask, field, idx, load = _VEC_ELEM[h.group(1) + "x"]
+            out.append(lines[i])
+            out.append("\tea = %s & %s;  // rexauto: element load, was a full lvx" 
+                       % (ea_m.group(1), mask))
+            out.append("\tctx.v%s.%s[%s] = %s(ea);" % (h.group(2), field, idx, load))
+            fixed += 1
+            changed = True
+            i += 3
+        if changed:
+            with open(fp, "w", encoding="utf-8", newline="\n") as f:
+                f.write("\n".join(out))
+    if fixed and log:
+        log("  codegen fix: %d vector element load(s) (lvebx/lvehx/lvewx) rewritten "
+            "from a full-vector load (SDK 0.8.2 lowers them as lvx)" % fixed)
+    return fixed

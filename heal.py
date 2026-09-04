@@ -219,6 +219,81 @@ def unresolved_branches_from_generated(gen_dir):
     return sorted(out)
 
 
+def _emitted_symbols(gen_dir):
+    """(function starts, loc_ labels) already present in generated/."""
+    import os as _os
+    defined, labels = set(), set()
+    if not _os.path.isdir(gen_dir):
+        return defined, labels
+    for fn in _os.listdir(gen_dir):
+        if not fn.endswith((".cpp", ".h")):
+            continue
+        t = _read_text(_os.path.join(gen_dir, fn))
+        defined |= {int(a, 16) for a in
+                    re.findall(r"DEFINE_REX_FUNC\(sub_([0-9A-Fa-f]+)\)", t)}
+        labels |= {int(a, 16) for a in re.findall(r"\bloc_([0-9A-Fa-f]{8})\b", t)}
+    return defined, labels
+
+
+def data_pointer_scan(image_path, gen_dir, image_base, code_base, code_size):
+    """Function pointers the static scan missed, read out of the image's DATA.
+
+    A vtable entry, a callback array or a jump-table-of-handlers is just a dword
+    in a data section holding a code address. The recompiler's own scan follows
+    control flow, so it never sees them, and the run-heal then finds them one at
+    a time by launching the game and crashing on each -- on Gears of War Judgment
+    35 of its 46 cures are sitting in the image in plain sight.
+
+    Filters (the same shape hells-gate-recomp uses in ReXGlue's
+    dataSectionFunctionPointerScan, which is where this idea comes from):
+      - read only OUTSIDE the code range; scanning code itself is what makes this
+        noisy (whole-image: 1,878 spurious candidates, data-only: 315)
+      - 4-byte aligned value, not 0 and not 0xFFFFFFFF
+      - value must land inside the code range
+      - the target's own first instruction must not be 0x00000000/0xFFFFFFFF
+        (alignment padding, not a function)
+
+    Plus one rule of our own, which their SDK-side version does not need: drop
+    anything already emitted as a `loc_` label. Inside an existing function body
+    that address is a LANDING, and registering it as a function splits the
+    routine -- the failure that made Judgment die 0.7s into every launch.
+
+    Returns sorted new addresses (nothing already emitted as a function)."""
+    import array
+    import sys as _sys
+    import os as _os
+    if not (image_path and _os.path.exists(image_path)) or not code_size:
+        return []
+    with open(image_path, "rb") as f:
+        img = f.read()
+    code_end = code_base + code_size
+    words = array.array("I")
+    words.frombytes(img[:len(img) - (len(img) % 4)])
+    if _sys.byteorder == "little":
+        words.byteswap()                      # image is big-endian
+    lo_w = (code_base - image_base) // 4
+    hi_w = (code_end - image_base) // 4
+    defined, labels = _emitted_symbols(gen_dir)
+    out = set()
+    for i, v in enumerate(words):
+        if lo_w <= i < hi_w:                  # skip the executable section
+            continue
+        if v == 0 or v == 0xFFFFFFFF or (v & 3):
+            continue
+        if not (code_base <= v < code_end):
+            continue
+        if v in defined or v in labels:
+            continue
+        j = (v - image_base) // 4
+        if j >= len(words):
+            continue
+        t = words[j]
+        if t == 0 or t == 0xFFFFFFFF:         # padding, not code
+            continue
+        out.add(v)
+    return sorted(out)
+
+
 def load_forced(path):
     """Set of addresses in a `forced_landings = [..]` TOML (empty if absent)."""
     if not os.path.exists(path):
@@ -244,8 +319,16 @@ def write_forced(path, addrs):
 
 
 def ensure_manifest_include(manifest_path, include_name):
-    """Add include_name to the manifest's `includes = [..]` array if missing (idempotent)."""
+    """Add include_name to the manifest's `includes = [..]` array if missing (idempotent).
+
+    Refuses to declare a file that does not exist beside the manifest: rexglue
+    treats a missing include as a hard manifest error ("included file not found")
+    and codegen aborts before it starts. That is exactly what happened when the
+    unresolved-branch heal cured its targets as plain functions (n_seed == 0, so
+    no forced-landings file was ever written) and the include was added anyway."""
     if not os.path.exists(manifest_path):
+        return
+    if not os.path.exists(os.path.join(os.path.dirname(manifest_path), include_name)):
         return
     txt = _read_text(manifest_path)
     if include_name in txt:
@@ -293,7 +376,7 @@ def extend_switch_table(addrs, switch_path, spans):
     return added
 
 
-def register_or_seed(addrs, toml_path, forced_path, switch_path=None):
+def register_or_seed(addrs, toml_path, forced_path, switch_path=None, called=False):
     """Partition unregistered-function addresses. Any addr that falls INSIDE an existing
     function's `end`-override span is a computed-goto/jump-table LANDING of that routine
     (an indirect target the runtime reached but the static scan left uncovered) -- route
@@ -308,6 +391,34 @@ def register_or_seed(addrs, toml_path, forced_path, switch_path=None):
 
     def in_routine(x):
         return any(s <= x < e for s, e in spans)
+
+    def owner_of(x):
+        for s, e in spans:
+            if s <= x < e:
+                return s
+        return None
+
+    # A target inside another function's span is a LANDING only if control got
+    # there by a branch. When the runtime says "Call to invalid or unregistered
+    # function", it was CALLED -- and a forced landing can never satisfy a call:
+    # it emits a `loc_` label, not a function-table entry, so the dispatcher keeps
+    # rejecting the same address forever ("already registered but still flagged",
+    # Dante's Inferno 0x829083F0 inside 0x82908284). The cure for a called
+    # interior address is a CHUNK: `{ parent = <owner> }` gives classifyTarget a
+    # chunkParent, so the call lowers to a real entry without splitting the owner.
+    if called:
+        chunks = [(a, owner_of(a)) for a in addrs if in_routine(a)]
+        if chunks:
+            full = load_overrides_full(toml_path)
+            for a, owner in chunks:
+                attrs = full.get(a) or {"end": None, "parent": None,
+                                        "size": None, "name": None}
+                if attrs.get("parent") is None:
+                    attrs["parent"] = owner
+                    full[a] = attrs
+            write_overrides_full(toml_path, full)
+        funcs = [a for a in addrs if not in_routine(a)]
+        return register_functions(funcs, toml_path) + len(chunks), 0
 
     landings = sorted(a for a in addrs if in_routine(a))
     funcs = [a for a in addrs if not in_routine(a)]
