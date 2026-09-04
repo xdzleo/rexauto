@@ -1,5 +1,71 @@
 # Changelog
 
+## 2.35.2 — "name the corpse" (2026-09-04)
+
+**The port stops dying in the middle of gameplay.** Ships a rebuilt ReXGlue SDK
+with two more runtime fixes, both open upstream.
+
+### The crash was a data race in the input system
+
+Gears of War Judgment had been dying between roughly 48 s and 160 s with
+`STATUS_HEAP_CORRUPTION` (0xC0000374) or an access violation inside the
+allocator — and **nothing in the log**, because both are fail-fast paths that no
+handler sees. It was listed as an honest open limit in 2.35.0. It is fixed.
+
+`InputSystem` had no synchronisation at all, and `RefreshDevices()` clears and
+rebuilds `devices_` / `device_owners_` on **every** call. It is called from all
+four guest-facing entry points, which titles reach through `XamInput*` from more
+than one guest thread at once. Two concurrent input polls were freeing and
+reallocating the same `std::vector`:
+
+```
+guest sub_82DCA948 -> sub_8232D958 -> sub_8299CAE0
+  XamInputGetState_entry            xam_input.cpp:115
+  InputSystem::RefreshDevices()     input_system.cpp:157
+  std::vector<DeviceInfo>::clear() -> _Destroy_range -> deallocate   <-- faults
+```
+
+The lock covers the whole body of each entry point, not just `RefreshDevices()`:
+`assignment_` and `active_devices_` are the same shared state reached from the
+same threads, so guarding the vectors alone would have moved the race rather than
+closed it.
+
+| | result |
+|---|---|
+| before | died at 13 s / 54 s / 74 s / 121 s / 160 s |
+| after | three runs of 200 s, zero fatals, no crash report |
+
+Recompilation is untouched: 99.2073% of code bytes, 60,146 functions, 0 holes —
+the same numbers as 2.35.1.
+
+### A crash now leaves something behind
+
+Finding the above took building diagnostics that did not exist, so they ship. The
+runtime installs a `std::terminate` handler and an unhandled-exception filter that
+append to `rexglue-crash.txt` beside the executable: the exception type and
+message (or the fault code and address) plus a return-address backtrace as
+`module+RVA`, which `llvm-symbolizer` turns into real frames against the port's
+PDB.
+
+Its honest limit, learned the hard way: a heap-corruption fail-fast bypasses both
+handlers and still writes nothing. It is the access-violation variant that gets
+caught — which was enough here, and is enough for the ordinary case of an
+exception escaping a `noexcept` boundary.
+
+### Measured in passing
+
+Our locally built `rexglue` does codegen about 21% slower than the upstream
+prebuilt (13.4 s vs 11.1 s on Dante's Inferno, 36,479 functions). That is the
+build environment, not our patches: the same tree with all four codegen patches
+reverted takes 13.5 s. Noted, not fixed.
+
+Upstream now: [#427](https://github.com/rexglue/rexglue-sdk/pull/427),
+[#428](https://github.com/rexglue/rexglue-sdk/pull/428),
+[#429](https://github.com/rexglue/rexglue-sdk/pull/429),
+[#430](https://github.com/rexglue/rexglue-sdk/pull/430),
+[#431](https://github.com/rexglue/rexglue-sdk/pull/431),
+[#432](https://github.com/rexglue/rexglue-sdk/pull/432).
+
 ## 2.35.1 — "a check that shrugs is not a check" (2026-09-04)
 
 ### An SDK older than v0.10.0 is now refused outright

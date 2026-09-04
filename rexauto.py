@@ -3318,9 +3318,13 @@ SDK_PIN = {
     # rexgpu-xenos.dll is pinned as well now: v0.10.0 moved the GPU out into a
     # plugin, so an SDK whose runtime matches but whose plugin does not renders
     # nothing while reporting only "gpu_plugin not set; call ignored".
-    "rexglue.exe": "563b1a0c1b029efb3eab34dc369b5cbca00d6084d6829fe5b92e978dae2a2776",
-    "rexruntime.dll": "56eec5aa02cefb92b1a979f129b145f86a53a49b407d94b4906a69c2336b359e",
-    "rexgpu-xenos.dll": "6701c65c85af0d5e01c3b007e3705a435138e6c59a320734d3d94ace6eb0d1c6",
+    # v2.35.2: rebuilt with two more runtime fixes -- the InputSystem device-table
+    # race that killed Gears of War Judgment between 48s and 160s of gameplay
+    # (rexglue/rexglue-sdk#432), and last-chance crash diagnostics so the next one
+    # leaves a symbolisable backtrace instead of an empty log.
+    "rexglue.exe": "194b8d37c4a095fe7e08e496b41fc000667b382399f556915e59bc8cc6afb147",
+    "rexruntime.dll": "ed727ad0f4266bc1fee2eea7c7588cafb4815c5ada1329411c01b35b8814904a",
+    "rexgpu-xenos.dll": "e4247862e573e91a8dad5df99d1f3f3e421dd0a26037788bf765885267c037bb",
 }
 
 
