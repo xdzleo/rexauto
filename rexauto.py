@@ -2060,6 +2060,68 @@ def stage_deepextract(ctx, gen_current=False):
                                     "accepted": len(accepted), "landings": n_land})
 
 
+def _gap_fill_register(ctx):
+    """Register the start of every stretch of the code range that carries
+    instructions and has no emitted C++ behind it.
+
+    The coverage measurement already knows exactly which bytes came out of
+    codegen; this closes the loop by feeding the gaps back as function starts.
+    Two kinds of gap are skipped because there is nothing there to recompile:
+
+      - alignment padding between functions (only 0x00000000 / `nop`), which is
+        the overwhelming majority -- on Gears of War Judgment 112,832 bytes of
+        it, against 11,064 bytes of real code;
+      - the import thunk table, whose entries are two data words followed by
+        `mtctr`/`bctr` and are resolved by the runtime, not recompiled.
+
+    Judgment went 11,064 -> 5,672 -> 5,864 bytes of uncovered code over three
+    rounds and 59,761 -> 60,137 functions. Returns the addresses registered."""
+    import array
+    image = os.path.join(ctx.work, "%s_image.bin" % ctx.name)
+    hdr = os.path.join(ctx.gen, ctx.name + "_init.h")
+    if not (os.path.exists(image) and os.path.exists(hdr)):
+        return []
+    try:
+        h = _heal._read_text(hdr)
+        ib = int(re.search(r"REX_IMAGE_BASE 0x([0-9A-Fa-f]+)", h).group(1), 16)
+        cb = int(re.search(r"REX_CODE_BASE 0x([0-9A-Fa-f]+)", h).group(1), 16)
+        cs = int(re.search(r"REX_CODE_SIZE 0x([0-9A-Fa-f]+)", h).group(1), 16)
+        with open(image, "rb") as f:
+            raw = f.read()
+        w = array.array("I")
+        w.frombytes(raw[:len(raw) - (len(raw) % 4)])
+        if sys.byteorder == "little":
+            w.byteswap()
+    except Exception:
+        return []
+
+    def word(a):
+        o = (a - ib) // 4
+        return w[o] if 0 <= o < len(w) else None
+
+    merged = _closure.covered_ranges(ctx.gen)
+    gaps, pos = [], cb
+    for st, en in merged:
+        if st > pos:
+            gaps.append((pos, st))
+        pos = max(pos, en)
+    if pos < cb + cs:
+        gaps.append((pos, cb + cs))
+    known = set(_heal.load_overrides_full(ctx.functions))
+    out = []
+    for st, en in gaps:
+        ws = [word(a) for a in range(st, en, 4)]
+        if all(x in (0, 0x60000000, None) for x in ws):
+            continue                                  # alignment padding
+        if any(x == 0x7D6903A6 for x in ws) and any(x == 0x4E800420 for x in ws):
+            continue                                  # import thunk table
+        if st not in known:
+            out.append(st)
+    if out:
+        _heal.register_functions(out, ctx.functions)
+    return out
+
+
 def _pointer_scan_register(ctx):
     """Register the function pointers sitting in the image's data sections.
 
@@ -2160,6 +2222,28 @@ def stage_build(ctx):
                                 "(thunks / untranslated regions) -> dropped, "
                                 "re-running codegen" % len(_bad))
                         do_codegen(ctx)
+                # Gap fill: whatever is left of the code range that carries
+                # instructions and still has no C++ behind it. Runs after the
+                # pointer scan so it only ever sees what that could not reach,
+                # and loops because closing one gap exposes the next.
+                for _round in range(6):
+                    _gaps = _gap_fill_register(ctx)
+                    if not _gaps:
+                        break
+                    ctx.log("  gap fill: %d uncovered code range(s) registered; "
+                            "re-running codegen" % len(_gaps))
+                    do_codegen(ctx)
+                    _def2, _ = _heal._emitted_symbols(ctx.gen)
+                    _drop = [a for a in _gaps if a not in _def2]
+                    if _drop:
+                        _ov2 = _heal.load_overrides_full(ctx.functions)
+                        for a in _drop:
+                            _ov2.pop(a, None)
+                        _heal.write_overrides_full(ctx.functions, _ov2)
+                        ctx.log("  gap fill: %d produced no definition -> dropped"
+                                % len(_drop))
+                        do_codegen(ctx)
+                        break
             # Static pre-heal: every unresolved call/branch trap is a literal
             # REX_FATAL(...) codegen just wrote into generated/. Cure the whole set
             # here -- before the first build -- instead of paying one
