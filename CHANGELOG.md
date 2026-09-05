@@ -1,5 +1,54 @@
 # Changelog
 
+## 2.36.3 — "one label too many" (2026-09-05)
+
+**Captain America's video plays.** The Marvel intro decodes cleanly, in colour,
+at the video's own 24 fps. The cause was a single wrong line in the port's own
+`ca_switch_tables.toml`: the jump table of Bink's block decoder (`bctr` at
+`0x82871704`) carried **11 labels for a 10-entry table**, and the extra one —
+the address of the table itself — sat at index 0.
+
+That array is positional. ReXGlue v0.10.0 lowers a `bctr` as
+`switch (index) { case i: goto labels[i]; }`, so one extra label re-points
+every case after it: block type 0 decoded with the handler for type 1, type 1
+with type 2's, and so on down the table. Everything still ran — the file was
+read correctly, the ring buffer held the right bytes, the audio track was
+untouched — and every frame came out as noise. v0.8.2 lowered the same table as
+`switch (ctx.ctr.u32) { case 0xTARGET: ... }`, keyed on the computed address,
+where a damaged array is harmless. That is the whole of "it works on the old
+SDK and not on the new one", and why the emitted C++, the machine code, the
+input bytes and the kernel-call sequence all compared identical.
+
+**The damage was ours, and it outlived its fix.** An earlier heal merged
+runtime-discovered landings into these arrays with `sorted(set(...))`, which
+deduplicates and re-sorts a list whose order *is* the dispatch. That merge was
+disabled in 2.36.0 after it rewrote 10 of Forza Horizon's 325 tables, but a
+port keeps the file it was given: the jump-table stage is skipped whenever
+`<name>_switch_tables.toml` already exists, so no later run ever repaired it.
+Captain America was carrying 43 damaged tables out of 242, FIFA Street 2 of 24.
+
+**`verify_switch_tables` now runs before every codegen.** It compares each
+block's labels against `jumptables.json` — the IDA pass's own output — and
+rewrites any that drifted, positionally. A table is only repaired when the
+recovered targets still read back out of the image at the table's address, and
+the whole pass refuses to touch a file when the json describes a different
+module. A port whose tables are intact comes out byte-identical, so titles that
+never suffered the merge see nothing.
+
+**Gate.** Build plus one 60-second production run per title, no heal cycles.
+Gears of War Judgment (99.1966% / 60,140 / 0), Dante's Inferno (98.9891% /
+36,546 / 0), Forza Horizon (98.9167% / 79,089 / 0) and Captain America all
+built and stayed alive for the full run; the first three keep every number
+they had. Captain America moves 99.0718% -> 99.0722% by byte coverage and
+32,643 -> 32,605 functions, which is the repair itself: 43 tables' worth of
+case targets are now classified against the right addresses.
+
+Spider-Man: Shattered Dimensions and FIFA Street still fail to build, on the
+two causes already in the backlog (an oscillating undeclared label, and a
+legacy `_app.h` plus the missing `XUsbcamGetState` import). Neither port's
+switch tables were touched by this release -- their files are untouched since
+4 September -- so this is the state they were already in.
+
 ## 2.36.2 — "the type field nobody reads" (2026-09-05)
 
 **Captain America renders.** Its logo screen, title art and "press start" were

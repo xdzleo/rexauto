@@ -34,6 +34,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -2930,6 +2931,117 @@ def apply_game_patches(ctx):
     ctx._game_patches = r["patches"]
 
 
+def verify_switch_tables(ctx, switches=None, work=None):
+    """Repair a [[switch_tables]] block whose `labels` array no longer matches the
+    jump table IDA recovered.
+
+    The array is POSITIONAL. rexglue v0.10.0 lowers a bctr as
+    `switch (index) { case i: goto labels[i]; }`, so ONE extra or missing label
+    silently re-points every case after it: the port still builds, still runs,
+    and dispatches to the wrong block forever. v0.8.2 keyed the same switch on
+    the computed CTR value (`case 0xTARGET:`), where a damaged array was
+    harmless -- which is why ports carried the damage through a fleet of green
+    runs and only started rendering garbage on the new SDK.
+
+    Captain America: its Bink block decoder (bctr 0x82871704) had 11 labels for
+    a 10-entry table, the extra one being the table's own address at index 0.
+    Every block type decoded with the handler of the type below it -- video
+    garbage, audio untouched. 43 of the port's 242 tables were damaged the same
+    way, by the landing-merge this file's heal once did with `sorted(set(...))`
+    (disabled since; see heal.merge_jt_landings). The damage outlives the fix
+    because the jump-table stage is skipped whenever the .toml already exists,
+    so it is repaired here, before every codegen.
+
+    jumptables.json (the IDA pass's own output) is the source of truth, and is
+    itself cross-checked against the image bytes at each table's address when
+    both are available. Refuses to touch anything if the json describes a
+    different module. Returns the number of tables repaired (0 = no-op, and the
+    file is left byte-identical)."""
+    switches = switches or ctx.switches
+    work = work or ctx.work
+    js = os.path.join(work, "jumptables.json")
+    if not (os.path.exists(switches) and os.path.exists(js)):
+        return 0
+    rows = {}
+    try:
+        for line in open(js):
+            line = line.strip()
+            if not line:
+                continue
+            o = json.loads(line)
+            if "bctr" in o and "targets" in o:
+                rows[o["bctr"]] = o
+    except (OSError, ValueError):
+        return 0
+    if not rows:
+        return 0
+    try:
+        txt = open(switches).read()
+    except OSError:
+        return 0
+    blocks = list(re.finditer(
+        r"(\[\[switch_tables\]\]\s*address\s*=\s*0x([0-9A-Fa-f]+)\s*register\s*=\s*\d+\s*labels\s*=\s*)"
+        r"\[([^\]]*)\]", txt))
+    if not blocks:
+        return 0
+    known = sum(1 for m in blocks if int(m.group(2), 16) in rows)
+    if known * 2 < len(blocks):
+        # jumptables.json belongs to another module (module views share ctx.work).
+        return 0
+    img = os.path.join(work, "%s_image.bin" % ctx.name)
+    blob = None
+    if os.path.exists(img):
+        try:
+            blob = open(img, "rb").read()
+        except OSError:
+            blob = None
+    base = 0x82000000
+    try:
+        m = re.search(r"base_address\s*=\s*(0x[0-9A-Fa-f]+|\d+)", open(ctx.manifest).read())
+        if m:
+            base = int(m.group(1), 0)
+    except OSError:
+        pass
+
+    def json_matches_image(row):
+        """Only trust a recovered table that still reads back out of the image."""
+        tbl = row.get("table")
+        if blob is None or not tbl:
+            return True
+        off = tbl - base
+        n = len(row["targets"])
+        if off < 0 or off + 4 * n > len(blob):
+            return True
+        real = list(struct.unpack(">%dI" % n, blob[off:off + 4 * n]))
+        return real == row["targets"]
+
+    fixed = []
+    for m in reversed(blocks):                  # reversed: earlier spans stay valid
+        row = rows.get(int(m.group(2), 16))
+        if not row:
+            continue
+        cur = [int(x, 16) for x in re.findall(r"0x[0-9A-Fa-f]+", m.group(3))]
+        want = row["targets"]
+        if cur == want or not want or not json_matches_image(row):
+            continue
+        body = ", ".join("0x%08X" % a for a in want)
+        txt = txt[:m.start()] + m.group(1) + "[" + body + "]" + txt[m.end():]
+        fixed.append((int(m.group(2), 16), len(cur), len(want)))
+    if not fixed:
+        return 0
+    open(switches, "w").write(txt)
+    fixed.reverse()
+    ctx.log("switch tables repaired: %d of %d had labels that no longer match the "
+            "recovered table (a positional array: one wrong label re-points every "
+            "case after it)" % (len(fixed), len(blocks)))
+    for addr, had, now in fixed[:8]:
+        ctx.log("  bctr 0x%08X: %d labels -> %d" % (addr, had, now))
+    if len(fixed) > 8:
+        ctx.log("  ... e mais %d" % (len(fixed) - 8))
+    ctx.t_note(switch_tables_repaired=len(fixed))
+    return len(fixed)
+
+
 def stage_build(ctx):
     miss = [k for k in ("vcvars", "clang", "clangxx", "sdk") if not ctx.env[k]]
     if miss:
@@ -2939,6 +3051,7 @@ def stage_build(ctx):
     if not _heal.load_overrides(ctx.functions):  # fresh project -> seed from the shared gabarito
         fetch_gabarito(ctx)
     _migrate_legacy_app_header(ctx)  # 0.8.2-era src/<name>_app.h; no-op once migrated
+    verify_switch_tables(ctx)  # positional labels vs the recovered table; no-op when intact
     setup_extra_modules(ctx)   # codegen + wire any extra recompiled modules (no-op if none)
     apply_game_patches(ctx)    # community patches land in the image before codegen
     last_ends = None
@@ -3109,6 +3222,27 @@ def stage_build(ctx):
             ctx.log("  clang OUT OF MEMORY (too many concurrent frontends) -> "
                     "retrying incrementally with --parallel %d" % oom_parallel)
             continue
+        if "has been modified since the precompiled header" in txt:
+            # Installing a new SDK gives every header a new mtime. Ninja then
+            # rebuilds the .pch, but the object files that consume it are not
+            # ordered after it, so a whole build can compile against the stale
+            # one and clang refuses every TU. Deleting the .pch files makes the
+            # next round regenerate them first. Costs one full rebuild after an
+            # SDK bump, and nothing at all otherwise.
+            gone = 0
+            for root, _dirs, files in os.walk(ctx.builddir):
+                for f in files:
+                    if f.endswith(".pch"):
+                        try:
+                            os.remove(os.path.join(root, f))
+                            gone += 1
+                        except OSError:
+                            pass
+            if gone:
+                skip_codegen = True  # generated/ is current; only the PCH was stale
+                ctx.log("  precompiled header older than the installed SDK headers -> "
+                        "removed %d .pch and rebuilding" % gone)
+                continue
         if "use of undeclared label" in txt:
             # Two undeclared-label classes: (a) a jump-table landing the SDK's heuristic
             # under-recovered -> force the SDK to recover it as an in-function block
@@ -4001,7 +4135,7 @@ def verify_sdk_floor(env):
 # built from, so anyone can rebuild the bundled SDK from that branch.
 # The release this source belongs to. The GUI's Setup fetches the SDK of THIS
 # tag, never "latest": a newer release's SDK would fail this build's pin.
-REXAUTO_VERSION = "2.36.2"
+REXAUTO_VERSION = "2.36.3"
 
 SDK_PIN = {
     # v2.35: ReXGlue v0.10.0 becomes the default SDK, built from source with four
@@ -4068,9 +4202,9 @@ SDK_PIN = {
     #     builds every Bink plane texture that way (intro and title were flat
     #     magenta) and Forza Horizon logs two thousand per run. The fork this
     #     runtime replaced shipped the same default and ran the fleet on it.
-    "rexglue.exe": "2156527127c2fa294e09db0517993f1c2bf9b3bdd483410dc75ce02b00f2c314",
-    "rexruntime.dll": "2d6b311ecc48583f1c9151322fa304fbe9f3cda05c054de3b6c0a573e56b0536",
-    "rexgpu-xenos.dll": "143cc96ab4116c645ba79dea9fa3c04947b54f1d99d458e04c179f002fd3f76b",
+    "rexglue.exe": "fa50448bd146fb1d6061e02f0fac1bef2296c5487ff46d01821b5abc12e4fcef",
+    "rexruntime.dll": "aaa5110a8d7c83e4a1df9b2c6ae4dc12120b6851af7f3f3acba851016ef78bcc",
+    "rexgpu-xenos.dll": "f8f1490e5c900dd45d206e51b2922cfa9fa8e4fa72c5e187797d98bf39d3200a",
 }
 
 
