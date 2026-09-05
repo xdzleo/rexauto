@@ -60,11 +60,12 @@ foreach ($p in $presets) {
   if ((Fits $p.w $p.h) -and -not ($modes | Where-Object { $_.w -eq $p.w -and $_.h -eq $p.h })) { $modes += $p }
 }
 
-$cfg = @{ w = 1280; h = 720; full = $true; monitor = 0; vsync = $true; tolerant = $true }
+$cfg = @{ w = 1280; h = 720; full = $true; monitor = 0; vsync = $true; tolerant = $true;
+          scale = 1; aa = 'none'; aniso = 3; fetch = __FETCH_DEFAULT__ }
 if (Test-Path $cfgPath) {
   try {
     $j = Get-Content $cfgPath -Raw | ConvertFrom-Json
-    foreach ($k in @('w', 'h', 'full', 'monitor', 'vsync', 'tolerant')) {
+    foreach ($k in @('w', 'h', 'full', 'monitor', 'vsync', 'tolerant', 'scale', 'aa', 'aniso', 'fetch')) {
       if ($null -ne $j.$k) { $cfg[$k] = $j.$k }
     }
   } catch { }
@@ -72,7 +73,7 @@ if (Test-Path $cfgPath) {
 
 $f = New-Object System.Windows.Forms.Form
 $f.Text = '__GAME_TITLE__'
-$f.ClientSize = New-Object System.Drawing.Size(454, 360)
+$f.ClientSize = New-Object System.Drawing.Size(454, 476)
 $f.StartPosition = 'CenterScreen'
 $f.FormBorderStyle = 'FixedDialog'
 $f.MaximizeBox = $false
@@ -81,11 +82,11 @@ $f.BackColor = [System.Drawing.Color]::FromArgb(16, 19, 22)
 $f.ForeColor = [System.Drawing.Color]::FromArgb(226, 232, 226)
 $f.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 
-function Add-Cap($text, $x, $y) {
+function Add-Cap($text, $x, $y, $w = 300) {
   $l = New-Object System.Windows.Forms.Label
   $l.Text = $text
   $l.Location = New-Object System.Drawing.Point($x, $y)
-  $l.Size = New-Object System.Drawing.Size(300, 16)
+  $l.Size = New-Object System.Drawing.Size($w, 16)
   $l.ForeColor = [System.Drawing.Color]::FromArgb(140, 150, 140)
   $f.Controls.Add($l)
 }
@@ -150,16 +151,60 @@ $ckTol.Size = New-Object System.Drawing.Size(410, 22)
 $ckTol.Checked = [bool]$cfg.tolerant
 $f.Controls.Add($ckTol)
 
+function New-Combo($x, $y, $w, $items, $sel) {
+  $c = New-Object System.Windows.Forms.ComboBox
+  $c.Location = New-Object System.Drawing.Point($x, $y)
+  $c.Size = New-Object System.Drawing.Size($w, 24)
+  $c.DropDownStyle = 'DropDownList'
+  $c.BackColor = [System.Drawing.Color]::FromArgb(26, 30, 34)
+  $c.ForeColor = $f.ForeColor
+  foreach ($i in $items) { [void]$c.Items.Add($i) }
+  $c.SelectedIndex = [Math]::Max(0, [Math]::Min($sel, $c.Items.Count - 1))
+  $f.Controls.Add($c)
+  return $c
+}
+
+# Escala interna: multiplica os alvos de render do Xenos (o jogo continua
+# achando que desenha em 720p). Custo cresce com o quadrado; exige reiniciar.
+$scales = @(1, 2, 3, 4)
+Add-Cap 'ESCALA DE RENDERIZACAO' 22 226 200
+$cbScale = New-Combo 22 244 200 @(
+  '1x   nativo do jogo',
+  '2x   720p -> 1440p',
+  '3x   720p -> 2160p',
+  '4x   720p -> 2880p') ([Math]::Max(0, [array]::IndexOf($scales, [int]$cfg.scale)))
+
+# FXAA e pos-processo no swap; o Xenos so expoe o MSAA que o proprio jogo pediu,
+# entao nao ha como forcar mais do que isso.
+$aas = @('none', 'fxaa', 'fxaa_extreme')
+Add-Cap 'ANTI-ALIASING' 232 226 200
+$cbAA = New-Combo 232 244 200 @('Desligado', 'FXAA', 'FXAA extremo') `
+  ([Math]::Max(0, [array]::IndexOf($aas, [string]$cfg.aa)))
+
+# So afeta textura com mipmap e filtro linear -- UI em point sampling fica intacta.
+$anisos = @(-1, 0, 2, 3, 4, 5)
+Add-Cap 'FILTRO ANISOTROPICO' 22 282 200
+$cbAniso = New-Combo 22 300 200 @(
+  'Nao sobrepor', 'Desligado', '2x', '4x (padrao)', '8x', '16x') `
+  ([Math]::Max(0, [array]::IndexOf($anisos, [int]$cfg.aniso)))
+
+$ckFetch = New-Object System.Windows.Forms.CheckBox
+$ckFetch.Text = 'Aceitar fetch constants "invalidos" (corrige tela rosa)'
+$ckFetch.Location = New-Object System.Drawing.Point(232, 300)
+$ckFetch.Size = New-Object System.Drawing.Size(200, 40)
+$ckFetch.Checked = [bool]$cfg.fetch
+$f.Controls.Add($ckFetch)
+
 $note = New-Object System.Windows.Forms.Label
-$note.Text = 'Sem o limite de quadros o jogo renderiza o quanto a maquina der -- centenas de fps ate numa tela de menu. Isso e um transiente grande de energia na GPU. Deixe marcado a menos que va medir desempenho.'
-$note.Location = New-Object System.Drawing.Point(22, 226)
-$note.Size = New-Object System.Drawing.Size(410, 56)
+$note.Text = 'Sem o limite de quadros o jogo renderiza o quanto a maquina der -- centenas de fps ate numa tela de menu. Isso e um transiente grande de energia na GPU. Deixe marcado a menos que va medir desempenho. Escala e anti-aliasing valem a partir do proximo inicio.'
+$note.Location = New-Object System.Drawing.Point(22, 338)
+$note.Size = New-Object System.Drawing.Size(410, 62)
 $note.ForeColor = [System.Drawing.Color]::FromArgb(132, 142, 132)
 $f.Controls.Add($note)
 
 $btn = New-Object System.Windows.Forms.Button
 $btn.Text = 'JOGAR'
-$btn.Location = New-Object System.Drawing.Point(22, 296)
+$btn.Location = New-Object System.Drawing.Point(22, 412)
 $btn.Size = New-Object System.Drawing.Size(410, 42)
 $btn.FlatStyle = 'Flat'
 $btn.FlatAppearance.BorderSize = 0
@@ -176,6 +221,10 @@ $btn.Add_Click({
   $cfg.monitor = $cbMon.SelectedIndex
   $cfg.vsync = $ckVsync.Checked
   $cfg.tolerant = $ckTol.Checked
+  $cfg.scale = $scales[$cbScale.SelectedIndex]
+  $cfg.aa = $aas[$cbAA.SelectedIndex]
+  $cfg.aniso = $anisos[$cbAniso.SelectedIndex]
+  $cfg.fetch = $ckFetch.Checked
   try { $cfg | ConvertTo-Json | Set-Content -Path $cfgPath -Encoding utf8 } catch { }
 
   $env:REX_VIDEO_MODE_WIDTH = [string]$m.w
@@ -193,6 +242,13 @@ $btn.Add_Click({
   }
   if ($ckTol.Checked) { $env:REX_HEAL_DISCOVER = '1' }
   if ($gpu) { $env:REX_GPU_PLUGIN = $gpu }
+  # cvars do plugin de GPU: o runtime le cada um de REX_<NOME_MAIUSCULO>.
+  $env:REX_RESOLUTION_SCALE = [string]$cfg.scale
+  $env:REX_SWAP_POST_EFFECT = [string]$cfg.aa
+  $env:REX_ANISOTROPIC_OVERRIDE = [string]$cfg.aniso
+  # Sem isto o plugin descarta a textura cujo fetch constant ele considera
+  # "invalido", e o shader amostra nada -- a tela sai magenta.
+  if ($cfg.fetch) { $env:REX_GPU_ALLOW_INVALID_FETCH_CONSTANTS = 'true' }
 
   $argv = @()
   if ($root) { $argv += ('--game_data_root=' + $root) }
@@ -214,7 +270,7 @@ CMD = (
     "-File \"%~dp0launcher.ps1\"\r\n")
 
 
-def write(ctx, gpu_plugin=None, log=None):
+def write(ctx, gpu_plugin=None, log=None, quirks=None):
     """Grava `Launcher <name>.cmd` + `launcher.ps1` ao lado do exe.
 
     REXAUTO_NO_LAUNCHER=1 pula. Nao levanta: um port que construiu nao pode
@@ -227,7 +283,10 @@ def write(ctx, gpu_plugin=None, log=None):
         ps1 = (PS1.replace("__GAME_TITLE__", title)
                   .replace("__EXE_NAME__", "%s.exe" % ctx.name)
                   .replace("__GAME_ROOT__", (ctx.game or '').replace(chr(39), chr(39) * 2))
-                  .replace("__GPU_PLUGIN__", gpu_plugin or ""))
+                  .replace("__GPU_PLUGIN__", gpu_plugin or "")
+                  # offered, never preselected: it binds a descriptor the guest
+                  # marked invalid, which swaps a magenta area for garbage bytes
+                  .replace("__FETCH_DEFAULT__", "$false"))
         p_ps1 = os.path.join(ctx.builddir, "launcher.ps1")
         with open(p_ps1, "w", encoding="utf-8", newline="\r\n") as f:
             f.write(ps1)

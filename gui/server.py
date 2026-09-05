@@ -310,6 +310,17 @@ class Handler(BaseHTTPRequestHandler):
                               "text": "%s missing -- jump-table recovery will be "
                                       "SKIPPED and this title loses static bctr "
                                       "recovery entirely" % d["name"]})
+            # Same warning the CLI preflight gives: a small pagefile plus a game or a
+            # browser open beside the pipeline starves codegen, and it dies as exit
+            # 0xE06D7363 with nothing in the log. Forza Horizon lost four builds in
+            # six minutes to Hogwarts Legacy running in the background.
+            try:
+                import rexauto as _rx
+                _mem = _rx._commit_warning(_rx._commit_state())
+                if _mem:
+                    HUB.emit({"type": "log", "level": "warn", "text": "memory: " + _mem})
+            except Exception:
+                pass
             HUB.start(container, name, bool(data.get("run")), data.get("patches"))
             return self._send(200, "application/json", json.dumps({"ok": True}))
         if u.path == "/api/patches":

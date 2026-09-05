@@ -361,6 +361,29 @@ def run_one_runtime(name, port, bless, seconds):
     return name, "PASS", info
 
 
+def orphaned_baselines(projs):
+    """Blessed titles that no project on disk answers to any more.
+
+    The gate walks the fleet ROOT and looks up a baseline per project, so a title
+    that gets renamed or removed just stops being checked -- silently, which is
+    the one thing a guard must never do. Forza Horizon sat like this: blessed as
+    `forza_horizon` (161 generated files) while the live port had become
+    `forza_horizon_xbox360_x360club_xbxlnd`, so the gate reported NO-BASELINE for
+    the port and never mentioned that a blessed title had dropped off the map.
+    """
+    if not os.path.isdir(BASELINES):
+        return []
+    have = {name for name, _, _ in projs}
+    out = []
+    for f in sorted(os.listdir(BASELINES)):
+        if not f.endswith(".json") or f.endswith(".runtime.json"):
+            continue
+        name = f[:-len(".json")]
+        if name not in have:
+            out.append(name)
+    return out
+
+
 def main():
     args = sys.argv[1:]
     bless = "--bless" in args
@@ -392,6 +415,11 @@ def main():
     # the binary that produced it, and "rexglue.exe" alone does not identify one.
     print("  sdk: %s%s" % (rexglue, "  (PIN CHECK SKIPPED)"
                            if os.environ.get("REXAUTO_SKIP_SDK_CHECK") else "  [pin verified]"))
+    if not names:
+        _orphans = orphaned_baselines(projs)
+        if _orphans:
+            print("  WATCH LOST: %d blessed title(s) have no project on disk -- renamed or "
+                  "removed, and no longer gated: %s" % (len(_orphans), ", ".join(_orphans)))
     if os.environ.get("REXAUTO_SKIP_SDK_CHECK"):
         # With the check off, the path is the only identity the log carries -- and a
         # path is not an identity, because two builds live under out/install. Hash it.

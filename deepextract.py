@@ -41,10 +41,21 @@ _LOC = re.compile(r"^loc_([0-9A-Fa-f]{8}):")
 
 def read_ranges(gen, name):
     """(image_base, code_base, code_size, image_size) from the generated init.h."""
-    init = os.path.join(gen, "%s_init.h" % name)
-    if not os.path.exists(init):
+    # 0.8.2 put the defines in <name>_init.h, v0.10.0 puts them in <name>_pch.h,
+    # and a native [[modules]] companion names both after the project rather than
+    # the module key. Take the first emitted header that carries them.
+    cands = [os.path.join(gen, "%s_init.h" % name), os.path.join(gen, "%s_pch.h" % name)]
+    cands += sorted(glob.glob(os.path.join(gen, "*_pch.h")))
+    cands += sorted(glob.glob(os.path.join(gen, "*_init.h")))
+    txt = ""
+    for init in cands:
+        if os.path.exists(init):
+            t = open(init, encoding="utf-8", errors="replace").read()
+            if "REX_CODE_BASE" in t and "REX_IMAGE_SIZE" in t:
+                txt = t
+                break
+    if not txt:
         return None
-    txt = open(init, encoding="utf-8", errors="replace").read()
 
     def g(key):
         m = re.search(key + r"\s+0x([0-9A-Fa-f]+)", txt)

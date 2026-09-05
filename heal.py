@@ -102,6 +102,84 @@ def _fmt_entry(attrs):
     return "{ %s }" % ", ".join(parts) if parts else "{}"
 
 
+def clamp_overlapping_ends(full):
+    """Make the config satisfy the two invariants rexglue enforces.
+
+    rexglue refuses the whole config on the first overlap ("Overlapping
+    boundaries: 0x82AA6268+0x238 overlaps 0x82AA6270+0x230") and codegen aborts,
+    so one bad entry costs the entire title.
+
+    Two shapes, two repairs, and telling them apart matters:
+
+    * NESTED -- A starts before B and ends at or after B's end. That is one
+      routine with several entry points, not two routines: Forza Horizon had
+      0x82AA6268/6270/62A8/62FC all ending at 0x82AA64A0. Keep the outermost
+      span and make the inner ones CHUNKS of it. Shrinking them instead (which
+      this function used to do) produces a config that loads and is wrong -- the
+      chunks further in, like 0x82AA637C, end up with no owner and codegen dies
+      in its Write phase on "Unresolved conditional branch".
+    * PARTIAL -- A ends inside B but past B's start without containing it. There
+      is no reading of that as nesting, so clip A to B's start.
+
+    Chunks (`parent = ...`) are not boundaries here: a chunk is SUPPOSED to sit
+    inside its parent, and treating one as a boundary would undo every chunk cure.
+
+    Returns the number of entries changed.
+    """
+    changed = 0
+    while True:
+        owners = sorted(a for a, v in full.items() if not v.get("parent"))
+        hit = False
+        for i, a in enumerate(owners):
+            end_a = full[a].get("end")
+            if not end_a or i + 1 >= len(owners):
+                continue
+            b = owners[i + 1]
+            if end_a <= b:
+                continue
+            end_b = full[b].get("end")
+            if end_b is None or end_a >= end_b:
+                # nested: b is an entry point inside a. Anything that hung off b
+                # moves up to a as well -- the SDK resolves `parent` as a
+                # FUNCTION, and a chunk whose parent is itself a chunk killed
+                # codegen in its Write phase with a bare C++ exception.
+                for c, cv in full.items():
+                    if cv.get("parent") == b:
+                        cv["parent"] = a
+                full[b]["parent"] = a
+                full[b]["end"] = None
+            else:
+                full[a]["end"] = b
+            changed += 1
+            hit = True
+            break          # the owner set just changed; re-derive it
+        if not hit:
+            break
+
+    # Second invariant: a chunk has to sit inside its parent. Re-homing one is
+    # cheap; leaving it outside is not rejected by rexglue, it just stops meaning
+    # anything, which is worse than an error.
+    owners = sorted(a for a, v in full.items() if not v.get("parent"))
+    for a, v in full.items():
+        parent = v.get("parent")
+        if not parent:
+            continue
+        pend = full.get(parent, {}).get("end")
+        if parent < a and (pend is None or a < pend):
+            continue
+        owner = None
+        for o in owners:
+            if o >= a:
+                break
+            oend = full[o].get("end")
+            if oend is None or a < oend:
+                owner = o
+        if owner is not None and owner != parent:
+            v["parent"] = owner
+            changed += 1
+    return changed
+
+
 def write_overrides_full(toml_path, ov):
     """Write addr -> {end,parent,size,name} losslessly. Preserves any [meta] block."""
     meta = ""
@@ -116,6 +194,9 @@ def write_overrides_full(toml_path, ov):
               "# `end` = extend a function the recompiler split mid-flow;\n"
               "# `parent` = a chunk (address-taken sub-entry) of a parent function;\n"
               "# `{}`  = a function discovered at runtime by the heal loop.\n\n")
+    # Never hand rexglue a config it will reject: one overlapping boundary makes
+    # it refuse the file outright and the title loses its whole cure set.
+    clamp_overlapping_ends(ov)
     out = header + meta + "[functions]\n"
     for a in sorted(ov):
         out += '"0x%08X" = %s\n' % (a, _fmt_entry(ov[a]))
@@ -139,15 +220,89 @@ def write_overrides(toml_path, ov):
     write_overrides_full(toml_path, full)
 
 
-def heal_boundaries(build_log, gen_dir, toml_path):
-    """Add `end` extensions for every undeclared-label error. Returns count added."""
+def externally_called(gen_dir, addrs, owner):
+    """Of `addrs`, the ones some OTHER routine calls as sub_X.
+
+    An absorbed address becomes a chunk, and codegen then lowers a branch from
+    the parent into it as `goto loc_X` instead of a call -- which is right for a
+    sub-entry, except the label never gets emitted and the goto dangles forever.
+    Forza Horizon's 0x82AA6444 is the case: `bdz 0x82aa6444` came out as
+    `goto loc_82AA6444` once it was a chunk, while `beq cr6,0x82aa6424` one line
+    above came out as `sub_82AA6424(ctx, base); return;`.
+
+    An address with callers elsewhere is a function whatever else it also is, so
+    it must never be absorbed -- 12 sites call sub_82AA6444 from another
+    translation unit. Keeping it a function is what makes codegen emit the call.
+    """
+    if not addrs:
+        return set()
+    import glob
+    names = {"sub_%08X" % a: a for a in addrs}
+    hits = set()
+    own = "sub_%08X" % owner
+    for f in glob.glob(os.path.join(gen_dir, "*.cpp")):
+        try:
+            txt = open(f, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        for n, a in names.items():
+            if a in hits:
+                continue
+            # the definition itself and the parent's own body do not count
+            c = txt.count(n)
+            if c and ("DEFINE_REX_FUNC(%s)" % n) in txt:
+                c -= 1
+            if c > 0 and own not in txt:
+                hits.add(a)
+    return hits
+
+
+def retire_failed_landings(forced_path, dangling, state_no_force):
+    """Stop forcing a landing that demonstrably did not take.
+
+    A forced landing asks the SDK for `loc_X:` inside the enclosing routine. When
+    the address ALSO carries a function-table entry the SDK sometimes emits both
+    (Gears of War Judgment does, and its four landings work) and sometimes emits
+    only the entry, leaving the `goto loc_X` dangling forever -- Forza Horizon's
+    0x82AA6444. There is no structural way to tell which: across the fleet, `ca`
+    has 42 clashes on chunks that all got their label and 289 on plain functions
+    that all did not, which is the exact opposite of Gears.
+
+    So decide on evidence instead of shape. If a label is still dangling on a
+    round where its address is ALREADY in forced_landings, forcing it failed;
+    retire it and let codegen fall back to treating the target as a function, so
+    the goto becomes a call. Retired addresses are remembered, otherwise the next
+    round reads the same error and forces them straight back.
+
+    Returns (retired_now, updated_no_force).
+    """
+    already = load_forced(forced_path)
+    no_force = set(state_no_force or ())
+    retired = sorted((set(dangling) & already) - no_force)
+    if retired:
+        write_forced(forced_path, sorted(already - set(retired)), replace=True)
+        no_force |= set(retired)
+    return retired, no_force
+
+
+def heal_boundaries(build_log, gen_dir, toml_path, forced_path=None):
+    """Add `end` extensions for every undeclared-label error. Returns count added.
+
+    Everything happens against one in-memory config and lands in ONE write. That
+    matters: write_overrides_full enforces the "a chunk lives inside its parent"
+    invariant, so reparenting an entry onto F before F's end has grown makes the
+    entry look out-of-span and it gets re-homed onto whatever function happened to
+    cover it. Forza Horizon's landings ended up on 0x82AA5E84 that way instead of
+    on the 0x82AA62FC they belong to.
+
+    """
     txt = _read_text(build_log)
     errs = [(os.path.basename(m.group(1)), int(m.group(2)), int(m.group(3), 16))
             for m in UNDECL.finditer(txt)]
     if not errs:
         return 0
     per_file, starts = func_grid(gen_dir)
-    ov = load_overrides(toml_path)
+    full = load_overrides_full(toml_path)
     added = 0
     for fname, line, T in errs:
         rows = per_file.get(fname)
@@ -158,11 +313,29 @@ def heal_boundaries(build_log, gen_dir, toml_path):
         if F is None or i >= len(starts):
             continue
         nextStart = starts[i]
-        if ov.get(F) is None or (ov.get(F) or 0) < nextStart:
-            if F not in ov or ov[F] != nextStart:
-                added += 1
-            ov[F] = nextStart
-    write_overrides(toml_path, ov)
+        cur = (full.get(F) or {}).get("end")
+        if cur is not None and cur >= nextStart:
+            continue
+
+        # Never reach across another registered entry. The SDK v0.10.0 discovers
+        # jump-table landings as functions of their own (Forza Horizon's
+        # 0x82AA62A8/62FC/6310/.../6470 are all DISCOVERED FunctionNodes), and a
+        # function that spans one of them is an overlap rexglue refuses. Turning
+        # them into chunks instead -- what this pass did earlier today -- is no
+        # better: a chunk is emitted as its own sub_ and the `goto loc_` into it
+        # never gets a label, so the build dangles forever. The landing cure is
+        # the one that fits this SDK: a forced landing beside a discovered
+        # function makes codegen emit both the label and the entry (that is how
+        # Gears of War Judgment's four resolve). So when something sits between
+        # F and the target, leave F alone and let that cure work.
+        if any(F < a < nextStart and not full[a].get("parent") for a in full):
+            continue
+        entry = full.get(F) or {"end": None, "parent": None, "size": None, "name": None}
+        entry["end"] = nextStart
+        full[F] = entry
+        added += 1
+
+    write_overrides_full(toml_path, full)
     return added
 
 
@@ -341,11 +514,15 @@ def load_forced(path):
     return set(int(x, 16) for x in re.findall(r"0x[0-9A-Fa-f]+", m.group(1))) if m else set()
 
 
-def write_forced(path, addrs):
+def write_forced(path, addrs, replace=False):
     """Merge addrs into the forced_landings TOML. Returns count newly added (0 => no
-    change, so the file stays byte-identical on disk)."""
+    change, so the file stays byte-identical on disk).
+
+    `replace` writes exactly `addrs` instead of merging -- needed to REMOVE a
+    landing, which merging can never do.
+    """
     cur = load_forced(path)
-    merged = cur | set(addrs)
+    merged = set(addrs) if replace else (cur | set(addrs))
     if merged == cur and os.path.exists(path):
         return 0
     body = ", ".join("0x%08X" % a for a in sorted(merged))
@@ -387,7 +564,19 @@ def extend_switch_table(addrs, switch_path, spans):
     address is a jump-table landing the heuristic under-recovered: it hit the switch's
     `default: REX_CALL_INDIRECT_FUNC` because it was never a `case`. Adding it as a case
     makes build_bctr lower `case 0xA: goto loc_A;` (paired with a forced_landings loc_).
-    `spans` = [(start,end)] of end-override routines. Returns count of labels added."""
+    `spans` = [(start,end)] of end-override routines. Returns count of labels added.
+
+    DISABLED for ReXGlue v0.10.0, which is the floor now. That SDK lowers a
+    recovered table as `switch (index) { case i: goto labels[i]; }` -- the
+    labels array is POSITIONAL, duplicates included -- where 0.8.2 keyed the
+    cases on the computed CTR value. Merging a landing in as a sorted, deduped
+    set (what this did) silently re-pointed every case after the first change:
+    on Forza Horizon it rewrote 10 of 325 tables, dropped 65 duplicate slots and
+    the exe dispatched jump tables to the wrong blocks. A landing the table does
+    not cover is reached through the SDK's own `default:` indirect dispatch once
+    it is a forced landing / registered function, so nothing is lost by leaving
+    the table exactly as IDA recovered it."""
+    return 0
     if not addrs or not os.path.exists(switch_path):
         return 0
     txt = _read_text(switch_path)
