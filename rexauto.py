@@ -1353,7 +1353,7 @@ def write_game_root(ctx):
     # BEFORE the process starts. Without this the only way to pick them is editing
     # a .cmd by hand.
     _gpu = gpu_plugins(ctx)
-    _launcher.write(ctx, _gpu[0] if _gpu else None, log=ctx.log, quirks=gpu_quirks(ctx))
+    _launcher.write(ctx, _gpu[0] if _gpu else None, log=ctx.log)
 
 
 def gpu_plugins(ctx):
@@ -3229,37 +3229,6 @@ def _autoplay_thread(proc, stop_evt):
         stop_evt.wait(2.5)
 
 
-# The Xenos plugin's own words for a fetch constant it refuses: it drops the
-# texture, the shader samples nothing, and the frame is magenta.
-INVALID_FETCH = re.compile(r'fetch constant .* has "invalid" type')
-
-
-def gpu_quirks(ctx):
-    """{cvar: value} of GPU workarounds this title has been shown to need."""
-    q = ctx.load_state().get("gpu_quirks") or {}
-    return {k: v for k, v in q.items() if v}
-
-
-def note_gpu_quirks(ctx, log_text):
-    """Record a quirk this launch proved necessary. Returns True when new.
-
-    Evidence only: a title that never logs the warning never gets the flag, so
-    nothing changes for the rest of the fleet.
-    """
-    if not log_text or not INVALID_FETCH.search(log_text):
-        return False
-    q = dict(ctx.load_state().get("gpu_quirks") or {})
-    if q.get("gpu_allow_invalid_fetch_constants"):
-        return False
-    q["gpu_allow_invalid_fetch_constants"] = True
-    ctx.mark("gpu_quirks", q)
-    ctx.log("  GPU: this title presents fetch constants the plugin calls \"invalid\" and "
-            "drops -- each dropped texture is a magenta area. The launcher offers "
-            "gpu_allow_invalid_fetch_constants; it binds the descriptor anyway, which "
-            "trades the magenta for whatever that memory holds, so it is off by default.")
-    return True
-
-
 def run_once(ctx, seconds, discover=False):
     """Launch the game, let it run, kill it; return (newest-this-launch log text, alive).
     discover=True sets REX_HEAL_DISCOVER so the runtime logs+continues on each
@@ -3287,15 +3256,6 @@ def run_once(ctx, seconds, discover=False):
     _gpu = gpu_plugins(ctx)
     if _gpu and not env.get("REX_GPU_PLUGIN"):
         env["REX_GPU_PLUGIN"] = _gpu[0]
-    # NOT applied automatically. gpu_allow_invalid_fetch_constants makes the
-    # plugin bind a descriptor the guest marked invalid, so instead of a missing
-    # texture you get whatever that memory happens to hold: on Captain America
-    # the title screen went from flat magenta to blocks of garbage, which is not
-    # better, just louder. The quirk is recorded (note_gpu_quirks) and offered in
-    # the launcher; nothing turns it on for you.
-    # Frame-limited unless the caller says otherwise: an unattended window at an
-    # uncapped frame rate is a pointless thermal/power stress, and it has shut a
-    # test machine down mid-heal. Pacing changes nothing the heal looks at.
     env.setdefault("REX_VSYNC", "true")
     env.setdefault("REX_D3D12_ALLOW_VARIABLE_REFRESH_RATE_AND_TEARING", "false")
     # Runtime-side autoplay: the MnK driver synthesizes periodic START/A presses
@@ -3345,7 +3305,6 @@ def run_once(ctx, seconds, discover=False):
         # judged a run by its last two minutes. Take every part this launch
         # wrote, oldest first.
         _txt = "".join(_heal._read_text(q) for q in sorted(new, key=os.path.getmtime))
-        note_gpu_quirks(ctx, _txt)
         return _txt, alive
 
 
@@ -4042,7 +4001,7 @@ def verify_sdk_floor(env):
 # built from, so anyone can rebuild the bundled SDK from that branch.
 # The release this source belongs to. The GUI's Setup fetches the SDK of THIS
 # tag, never "latest": a newer release's SDK would fail this build's pin.
-REXAUTO_VERSION = "2.36.1"
+REXAUTO_VERSION = "2.36.2"
 
 SDK_PIN = {
     # v2.35: ReXGlue v0.10.0 becomes the default SDK, built from source with four
@@ -4104,9 +4063,14 @@ SDK_PIN = {
     #     with "not compressed" instead of INVALID_PARAMETER. We never serve
     #     XCTD-compressed bytes (the pipeline pre-decompresses), and the error
     #     made Captain America render none of its UI.
-    "rexglue.exe": "96baf3fbe8849bce4242f7fb68abba8d0b162152e1a2ff11c1c442b7d3dab949",
+    #   * gpu: gpu_allow_invalid_fetch_constants defaults ON. A texture fetch
+    #     constant with type 0 is still bound by the real GPU; Captain America
+    #     builds every Bink plane texture that way (intro and title were flat
+    #     magenta) and Forza Horizon logs two thousand per run. The fork this
+    #     runtime replaced shipped the same default and ran the fleet on it.
+    "rexglue.exe": "2156527127c2fa294e09db0517993f1c2bf9b3bdd483410dc75ce02b00f2c314",
     "rexruntime.dll": "2d6b311ecc48583f1c9151322fa304fbe9f3cda05c054de3b6c0a573e56b0536",
-    "rexgpu-xenos.dll": "eb486d08a733522e21709d798997dddc68c77a0a4546c0ddf091ee6d87721b6e",
+    "rexgpu-xenos.dll": "143cc96ab4116c645ba79dea9fa3c04947b54f1d99d458e04c179f002fd3f76b",
 }
 
 

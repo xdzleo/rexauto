@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.36.2 — "the type field nobody reads" (2026-09-05)
+
+**Captain America renders.** Its logo screen, title art and "press start" were
+already correct; everything drawn from a texture the game had built at runtime
+was flat magenta. The Xenos plugin refused every texture fetch constant whose
+2-bit type field said "invalid" (0) — and that is how Captain America builds
+every one of its Bink video planes, 19,000 refusals per launch. The real GPU
+only uses that field to tell texture fetches from vertex fetches; the fork this
+runtime replaced shipped `gpu_allow_invalid_fetch_constants=true` and ran the
+whole fleet on it, which is why "it used to work". The bundled SDK now defaults
+it on. Forza Horizon, which logged two thousand of the same refusals per run,
+keeps every number it had. The launcher checkbox and the per-title "quirk"
+detection that 2.36.0 added for this are gone: there is nothing left to toggle.
+
+**Still open on Captain America:** the Bink video itself. With the planes now
+bound, the decoder writes garbage into them — wrong from the first
+macroblock, "DC right, AC wrong". This is not codegen: the Bink library's
+recompiled code, its callees two levels down, its jump tables, the loaded
+image sections, the compiled machine code of the IDCT, the bytes it reads from
+the file, its decode rate and the sequence of kernel calls it makes are all
+identical between this build and a v2.27.0/0.8.2 build that decodes the intro
+correctly (and then goes black before the logos). Fences, flush-to-zero,
+`-fasync-exceptions`, TLS, thread priorities, heap scribbling and allocation
+zeroing were each tried or ruled out. The 151 Bink functions are instrumented
+in both trees for a call-stream diff; that is the next step.
+
+**Gate = one run.** The fleet gate is a build plus a single 60-second
+production run per title. No heal cycles, no 360-second confirms.
+
+**A bad rebuild caught by the gate.** Undoing an experiment with
+`git checkout -- helpers.h` also discarded the uncommitted `bdz` tail-call fix
+that lives in the same file; the rebuilt `rexglue` regressed Forza to
+`undeclared label loc_82AA6444`. The gate refused it, the file was restored
+from the fork's branch, and the tree was re-proven byte-identical to the
+fork's `rexauto` branch before installing. Every patch we ship has its commit
+in the fork; the working tree in `sdk2` is never the reference.
+
+**Upstream.** Every pull request we opened against `rexglue/rexglue-sdk`
+(#300–#440) was closed unmerged and the account is blocked there. The SDK
+rexauto ships is built from the fork's `rexauto` branch, which carries all
+fifteen fixes as their own branches.
+
 ## 2.36.1 — "the wrong SDK ran anyway" (2026-09-05)
 
 Two bugs reported against 2.36.0 within the hour, both real, both in how the
