@@ -23,9 +23,23 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+def _release_tag():
+    try:
+        import rexauto as _r
+        return "v" + _r.REXAUTO_VERSION
+    except Exception:
+        return "latest"
+
+
+# The SDK of THIS release, by tag. "latest" would hand an older rexauto a newer
+# SDK, which its pin then refuses -- exactly the trap a stale rexglue/ set for
+# v2.36.0 users, from the other side.
 REXGLUE_URL = os.environ.get(
     "REXGLUE_BUNDLE_URL",
-    "https://github.com/xdzleo/rexauto/releases/latest/download/rexglue-sdk-win64.zip")
+    ("https://github.com/xdzleo/rexauto/releases/latest/download/rexglue-sdk-win64.zip"
+     if _release_tag() == "latest" else
+     "https://github.com/xdzleo/rexauto/releases/download/%s/rexglue-sdk-win64.zip"
+     % _release_tag()))
 
 
 def app_dir():
@@ -61,6 +75,17 @@ def _sdk_version_status(e):
     if got < want:
         return False, "%s  -- v%s is too old, need v%s or newer" % (
             path, got_s, ".".join(map(str, want)))
+    # Right version, wrong build: a rexglue/ an older release laid down. The
+    # pipeline refuses it (SDK MISMATCH), so it is "not installed" here too,
+    # and Setup -- or the GUI at startup -- replaces it.
+    try:
+        bad = _r.sdk_pin_mismatch(e)
+    except Exception:
+        bad = None
+    if bad:
+        return False, "%s  -- v%s, but not the build this release was tested with (%s " \
+                      "is %s..., need %s...) -> Setup reinstalls it" % (
+                          path, got_s, bad[0], bad[2][:12], bad[1][:12])
     return True, "%s  (v%s)" % (path, got_s)
 
 
@@ -210,12 +235,24 @@ def install_rexglue(emit):
             os.remove(tmp)
         except OSError:
             pass
-    # the only verdict that matters: does detect_env() see it now?
+    # the only verdict that matters: does detect_env() see it now, and is it
+    # the build this release was tested with?
     e = _env()
     if not (e["rexglue"] and e["sdk"]):
         emit({"type": "setup", "level": "err",
               "text": "extracted, but detect_env() still can't see the SDK "
                       "(rexglue=%s, sdk=%s)" % (e["rexglue"], e["sdk"])})
+        return False
+    try:
+        import rexauto as _r
+        bad = _r.sdk_pin_mismatch(e)
+    except Exception:
+        bad = None
+    if bad:
+        emit({"type": "setup", "level": "err",
+              "text": "installed, but %s is not the build this release was tested with "
+                      "(sha256 %s..., expected %s...) -- wrong asset at %s"
+                      % (bad[0], bad[2][:12], bad[1][:12], REXGLUE_URL)})
         return False
     emit({"type": "setup", "level": "good", "text": "ReXGlue SDK installed -> %s\\rexglue" % dest_root})
     return True

@@ -161,6 +161,12 @@ class Hub:
                 self._parse(line.rstrip("\n"))
                 if "Traceback (most recent call last)" in line or "did not converge" in line:
                     ok = False
+                if "SDK MISMATCH" in line:
+                    # A rexglue/ left by an older release. Setup replaces it;
+                    # nothing else in the GUI does.
+                    self.emit({"type": "log", "level": "warn",
+                               "text": "the ReXGlue SDK installed here is not the one this "
+                                       "release was tested with -> Setup -> ReXGlue SDK"})
             if proc.wait() != 0:
                 ok = False
         except Exception:
@@ -374,10 +380,30 @@ def make_server():
     last = None
     for p in range(PORT, PORT + 30):
         try:
-            return ThreadingHTTPServer(("127.0.0.1", p), Handler), p
+            srv = ThreadingHTTPServer(("127.0.0.1", p), Handler)
         except OSError as ex:
             last = ex
+            continue
+        # app.py (the WebView2 window) calls this and never main(): the SDK
+        # check has to live here or the frozen exe skips it -- which is
+        # exactly what the first 2.36.1 build did.
+        threading.Thread(target=_install_sdk_if_needed, daemon=True).start()
+        return srv, p
     raise SystemExit("no free port for the GUI server: %s" % last)
+
+
+def _install_sdk_if_needed():
+    """Setup, unasked: a missing ReXGlue SDK, or one from another release, is
+    replaced with this release's before the user can start anything. The only
+    manual step left is the one that needs a licence (IDA)."""
+    row = next((d for d in _setup.deps_status() if d["key"] == "rexglue"), None)
+    if not row or row["found"]:
+        return
+    HUB.emit({"type": "log", "level": "warn",
+              "text": "ReXGlue SDK: %s" % row["detail"]})
+    HUB.emit({"type": "log", "level": "info",
+              "text": "installing the ReXGlue SDK this release was tested with..."})
+    _setup.run("rexglue", HUB.emit)
 
 
 def main():

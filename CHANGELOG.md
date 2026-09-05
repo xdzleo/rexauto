@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.36.1 — "the wrong SDK ran anyway" (2026-09-05)
+
+Two bugs reported against 2.36.0 within the hour, both real, both in how the
+release protects itself.
+
+### The SDK gate could be talked past
+
+A `rexglue/` laid down by an older release sat next to the new `rexauto.exe`.
+The pin caught it -- `SDK MISMATCH — refusing to run` -- and then the pipeline
+**kept going**: the image-dump codegen tolerates a failed dump (`except
+SystemExit` -> "skipping setjmp detection"), the refusal was a `SystemExit`,
+and because the check latched itself as "done" *before* raising, the main
+codegen that followed ran on the unpatched SDK without a word. Skate 3 then
+spent its build stage in a loop -- `codegen stuck on unresolved calls:
+0x881715C8` -- a target the unpatched recompiler cannot resolve (it is exactly
+the shape upstream PRs #435/#437 fix). With the pinned SDK that module emits
+zero unresolved calls.
+
+Now: the refusal is its own exception the tolerant stages re-raise; a pass is
+remembered, a refusal is raised again on every call; and there is **no
+override** any more -- `REXAUTO_SKIP_SDK_CHECK` is gone. Every port rexauto has
+ever shown correct was built on these exact binaries, and nothing else is
+allowed to build one.
+
+### Setup runs itself, and fetches the right release
+
+The GUI now treats a right-version-wrong-build SDK as *not installed*, says
+why (`v0.10.0, but not the build this release was tested with (rexglue.exe is
+194b8d37c4a0..., need 96baf3fbe884...)`), and installs the correct one at
+startup, unasked. The download is by **this release's tag**
+(`releases/download/v2.36.1/...`), not `latest` -- `latest` would hand an
+older rexauto a newer SDK its pin then refuses, the same trap from the other
+side. After extraction the pin is verified again before the install counts.
+
+### Multi-XEX titles lost their entrypoint jump tables
+
+With `[[modules]]` in the manifest the codegen trace lists every module's
+sections, and the jump-table stage took min/max of all of them: Skate 3's
+eawebkit sections at `0x88...` pushed the range to `0x8849CAD0`, the sanity
+check refused it (`parsed section range looks wrong -> skipping`), and the
+entrypoint silently lost static bctr recovery. Sections outside the entrypoint
+image are a companion's, not a parse error, and are set aside.
+**Skate 3: 0 -> 360 jump tables, 8,716 targets.**
+
+### The SDK is reproducible from the fork
+
+Branch [`rexauto`](https://github.com/xdzleo/rexglue-sdk/tree/rexauto) of our
+fork is upstream `main` plus all fourteen fixes we carry, each also its own
+branch and open upstream PR (#427–#440; #440, the crash report beside the
+executable, is new). Its tree is byte-identical to the source the bundled
+binaries were built from. Two PR branches were tidied in the process (#431
+carried a duplicated statement, #435 literal tabs inside a string); the
+merged result did not change.
+
+
 ## 2.36.0 — "the fleet was never rebuilt" (2026-09-04)
 
 **Forza Horizon reaches gameplay.** It was dead at 3 s; the three things it

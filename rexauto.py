@@ -734,6 +734,8 @@ def stage_setjmp(ctx):
             % ("PATCHED (title-update) " if tu else ""))
     try:
         blob = do_codegen(ctx, env={"REX_DUMP_IMAGE": image}, level="trace")
+    except SdkMismatch:
+        raise  # the wrong SDK is not a failed dump: nothing downstream may run
     except SystemExit as ex:
         ctx.log("codegen for image dump failed -> skipping setjmp detection (%s)" % ex)
         return ctx.mark("setjmp", {"skipped": "codegen-fail"})
@@ -803,6 +805,8 @@ def stage_jumptables(ctx):
         ctx.log("dumping decompressed image + reading section ranges")
         try:
             blob = do_codegen(ctx, env={"REX_DUMP_IMAGE": image}, level="trace")
+        except SdkMismatch:
+            raise
         except SystemExit as ex:
             ctx.log("codegen (for image dump) failed -> skipping jump tables (%s)" % ex)
             return ctx.mark("jumptables", {"skipped": "codegen-fail"})
@@ -816,6 +820,18 @@ def stage_jumptables(ctx):
         secs = re.findall(r"section '([^']+)' at 0x([0-9A-Fa-f]+) size 0x([0-9A-Fa-f]+) exec=(\w+)", blob)
         exec_secs = [(int(a, 16), int(a, 16) + int(sz, 16))
                      for _, a, sz, ex in secs if ex.lower() in ("true", "1")]
+        # With [[modules]] in the manifest the trace lists every module's
+        # sections. The jump tables recovered here are the ENTRYPOINT's (the
+        # companions get theirs through their own module view), so a section
+        # outside its image is another module's, not a parse error. Skate 3:
+        # the eawebkit sections at 0x88... pushed the range to 0x8849CAD0, the
+        # sanity check refused it, and the title lost static bctr recovery.
+        _foreign = [(a, e) for a, e in exec_secs if not (base <= a < e <= image_end)]
+        if _foreign:
+            exec_secs = [(a, e) for a, e in exec_secs if base <= a < e <= image_end]
+            ctx.log("  %d exec section(s) outside the entrypoint image (0x%X..0x%X) belong "
+                    "to companion module(s) -> not part of its range"
+                    % (len(_foreign), base, image_end))
         if not exec_secs:
             ctx.log("WARNING: could not parse exec sections from the rexglue trace (log format may "
                     "have changed) -> skipping jump tables")
@@ -3928,10 +3944,9 @@ def stage_run(ctx):
 
 # --------------------------------------------------------------------------- main
 # --- SDK version floor -------------------------------------------------------
-# Separate from SDK_PIN and, unlike it, NOT skippable. The pin says "this is the
-# exact SDK this rexauto was tested with", and REXAUTO_SKIP_SDK_CHECK=1 exists to
-# get past it during development. The floor says something stronger: rexauto now
-# *requires* v0.10.0 and cannot produce a correct port below it --
+# Separate from SDK_PIN. The pin says "this is the exact SDK this rexauto was
+# tested with". The floor says something stronger: rexauto now *requires*
+# v0.10.0 and cannot produce a correct port below it --
 #
 #   * [[image_patch]] lives in the manifest; an older rexglue ignores the block,
 #     so every community game patch silently vanishes from the build,
@@ -3970,9 +3985,6 @@ def _rexglue_version(path, tries=4):
 def verify_sdk_floor(env):
     """Refuse an SDK older than SDK_MIN_VERSION.
 
-    Deliberately ignores REXAUTO_SKIP_SDK_CHECK: that flag is for running against
-    an untested build of a SUPPORTED SDK, not against one that cannot work.
-
     Fails CLOSED when the version cannot be read. A check that shrugs when it
     cannot tell is not a check -- and this binary really does answer with nothing
     sometimes. REXAUTO_ALLOW_UNVERIFIED_SDK=1 is the deliberate way past that one
@@ -4009,8 +4021,7 @@ def verify_sdk_floor(env):
             "    at %s\n"
             "  rexauto needs v%s: [[image_patch]] (community game patches), the GPU\n"
             "  plugin split, and the codegen ranges that moved to <name>_pch.h. An older\n"
-            "  SDK does not fail on these -- it builds a port that is quietly wrong, so\n"
-            "  this check is NOT bypassable by REXAUTO_SKIP_SDK_CHECK.\n"
+            "  SDK does not fail on these -- it builds a port that is quietly wrong.\n"
             "  Install the rexglue-sdk bundled with this rexauto release (Setup in the\n"
             "  GUI, or extract it next to rexauto).\n"
             % (".".join(map(str, got)), want_s, path, want_s))
@@ -4022,8 +4033,17 @@ def verify_sdk_floor(env):
 # broken or crashing exes — the v1.3 fork migration changed the scaffolding and
 # the runtime ABI, exactly the kind of mismatch this guards against. rexauto
 # refuses to run against an SDK whose binaries don't match the ones it was built
-# and tested with. Override (advanced, may produce broken builds) by setting
-# REXAUTO_SKIP_SDK_CHECK=1. Bump these when the bundled SDK is updated.
+# and tested with. No override: every port rexauto has ever shown correct was
+# built on these exact binaries. Bump these when the bundled SDK is updated.
+#
+# Where the binaries come from: branch `rexauto` of github.com/xdzleo/rexglue-sdk
+# -- upstream main plus every fix below as its own branch (each one an open
+# upstream PR), merged. Its tree is byte-identical to the source these were
+# built from, so anyone can rebuild the bundled SDK from that branch.
+# The release this source belongs to. The GUI's Setup fetches the SDK of THIS
+# tag, never "latest": a newer release's SDK would fail this build's pin.
+REXAUTO_VERSION = "2.36.1"
+
 SDK_PIN = {
     # v2.35: ReXGlue v0.10.0 becomes the default SDK, built from source with four
     # fixes on top -- all four are open upstream, so this pin is a fork only until
@@ -4102,18 +4122,45 @@ def _sha256(path):
 _sdk_pin_checked = False
 
 
+def sdk_pin_mismatch(env):
+    """The first (name, expected, found) whose sha256 differs from SDK_PIN, or
+    None when every pinned binary next to env["rexglue"] matches. No side
+    effects and no exit: the GUI asks this to decide whether the ReXGlue row
+    counts as installed at all."""
+    rexglue = env.get("rexglue")
+    if not rexglue or not os.path.exists(rexglue):
+        return None
+    _bin = os.path.dirname(rexglue)
+    for name, want in SDK_PIN.items():
+        path = rexglue if name == "rexglue.exe" else os.path.join(_bin, name)
+        if not os.path.exists(path):
+            continue
+        got = _sha256(path)
+        if got != want:
+            return name, want, got
+    return None
+
+
+class SdkMismatch(SystemExit):
+    """The SDK on disk is not the one this rexauto was tested with.
+
+    Its own type so the stages that tolerate a failed codegen (image dump for
+    setjmp / jump tables: `except SystemExit` -> "skipping") cannot mistake it
+    for one. v2.36.0 swallowed the refusal there, and because the check was
+    latched as "done" before raising, the main codegen then ran on the wrong
+    SDK without a word.
+    """
+
+
 def verify_sdk_pin(env):
     """Refuse a mismatched SDK so an incompatible rexglue/runtime can't be used.
     Called right before any rexglue.exe use (codegen/init) -- a pure game run (the
     GUI Launch of an already-built title) never reaches it, so launching is never
-    blocked by a pin mismatch; only building/codegen is gated. Checked once."""
+    blocked by a pin mismatch; only building/codegen is gated. A PASS is
+    remembered; a refusal is raised again on every call. There is no override:
+    the SDK we ship is the only one these ports are known to be correct on."""
     global _sdk_pin_checked
     if _sdk_pin_checked:
-        return
-    _sdk_pin_checked = True
-    if os.environ.get("REXAUTO_SKIP_SDK_CHECK"):
-        print("[rexauto] WARNING: SDK pin check skipped (REXAUTO_SKIP_SDK_CHECK) — "
-              "an incompatible SDK may produce broken builds")
         return
     rexglue = env.get("rexglue")
     if not rexglue:
@@ -4128,15 +4175,16 @@ def verify_sdk_pin(env):
             continue
         got = _sha256(path)
         if got != want:
-            raise SystemExit(
+            raise SdkMismatch(
                 "[rexauto] SDK MISMATCH — refusing to run.\n"
                 "  %s does not match the SDK this rexauto was built and tested with.\n"
                 "    expected sha256 %s\n    found    sha256 %s\n    at %s\n"
-                "  Use the rexglue-sdk bundled with this rexauto release (extract it next\n"
-                "  to rexauto, or point REXSDK_DIR / REXGLUE at it). To override anyway\n"
-                "  (advanced — may produce broken or crashing builds): set "
-                "REXAUTO_SKIP_SDK_CHECK=1.\n"
+                "  GUI: Setup -> ReXGlue SDK installs the one for this release (a rexglue/\n"
+                "  left by an older rexauto is not replaced on its own).\n"
+                "  CLI: extract this release's rexglue-sdk-win64.zip next to rexauto, or\n"
+                "  point REXSDK_DIR / REXGLUE at it.\n"
                 % (name, want, got, path))
+    _sdk_pin_checked = True
 
 
 # --- Shared "gabarito" database: per-binary pre-discovered cures --------------

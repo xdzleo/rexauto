@@ -48,8 +48,9 @@ whole set byte-identical or better before it ships.
 1. Grab `rexauto.exe` from the [latest release](https://github.com/xdzleo/rexauto/releases/latest).
 2. Run it. A native window opens (Edge WebView2): a 3D scene, the game's cover art and title
    read straight from the package, a live six-stage tracker, and a streaming log.
-3. First run, open **Setup** (top-right) — it shows what's installed and fetches the rest:
-   - **ReXGlue SDK** — one click, prebuilt, wired up next to the app.
+3. First run, the app installs the **ReXGlue SDK** by itself — the exact build this release
+   was tested with, laid out next to the app (a `rexglue/` left by an older release is replaced
+   the same way). Open **Setup** (top-right) for the rest:
    - **LLVM/clang** + **VS Build Tools** — via `winget`.
    - **IDA Pro** — optional, commercial; only the jump-table stage uses it.
 4. Point it at a container, hit **Recompile**, watch it go.
@@ -89,7 +90,11 @@ them up front and skips most of the heal. Fetch is public and keyless; a miss ju
 scratch.
 
 The bundled SDK is **pinned by hash** — rexauto refuses to run against an SDK build it wasn't
-tested with, so a mismatched runtime can't silently produce a broken exe.
+tested with, so a mismatched runtime can't silently produce a broken exe. There is no override.
+The SDK itself is reproducible: branch
+[`rexauto`](https://github.com/xdzleo/rexglue-sdk/tree/rexauto) of our fork is upstream `main`
+plus every fix we carry, each one also an open upstream PR; its tree is byte-identical to the
+source the bundled binaries were built from.
 
 ## CLI
 
