@@ -1,5 +1,127 @@
 # Changelog
 
+## 2.36.0 — "the fleet was never rebuilt" (2026-09-04)
+
+**Forza Horizon reaches gameplay.** It was dead at 3 s; the three things it
+needed turned out to matter for the rest of the fleet too, and chasing them
+surfaced a fourth: **not one port in the local fleet could be rebuilt against
+the SDK we ship**.
+
+### The fleet was stale, and nothing said so
+
+`src/<name>_app.h` is the one file the pipeline never regenerates — it is the
+file a user may edit. ReXGlue 0.8.2's `init` emitted `<name>_PPCImageConfig`;
+v0.10.0 emits `PPCImageConfig`. So every port created before v0.10.0 failed with
+a single error the moment its generated tree was rebuilt. All five local titles
+(`gears_of_war_judgment`, `dante_s_inferno`, `ca`, `spider_man_dimensions`,
+`fifa_street`) died on it; only a freshly-initialised Forza passed. The
+`converged` / coverage numbers those ports carried in `.rexauto_state` were from
+the 0.8.2 era and proved nothing about the pinned SDK. `_migrate_legacy_app_header`
+renames that one symbol, only when the generated tree does not declare the
+prefixed name, so user edits survive.
+
+### The run-heal was judging a game nobody plays
+
+Every heal launch ran in **discover mode** (a no-op'd call returns instead of
+doing its work, so every branch after it can differ) and **without the GPU
+plugin** (no swap, no vblank, no render thread). Forza collected four clean 360 s
+verdicts for an exe that died 2 s into every production run. Now: the last launch
+before a convergence verdict is a production one, with the same GPU plugin and
+frame cap the player gets; a crash is reported as a crash (symbolised through the
+port's PDB) instead of "other stop"; and `run_once` reads **every rotated part**
+of a launch's log — Forza's 360 s window produced three parts and 80,000 lines,
+and only the newest was being read.
+
+### Companion XEX support, rebuilt on the SDK's own mechanism
+
+The 0.8.2 route — recompile the module alone, link its sources into the same exe,
+register its function table by hand in `OnPostSetup` — cannot compile against
+v0.10.0: the generated `app.h` calls a 6-argument `InitializeFunctionTable` and
+reads `PPCImageInfo::function_table_base`, neither of which exists, and
+`symbol_prefix` is gone from the manifest. `setup_extra_modules` now declares each
+companion as a `[[modules]]` entry of the entrypoint manifest, so one codegen
+emits entrypoint + companions and the runtime binds the shared library at the
+guest's `XexLoadImage`. Ports carrying the old glue get it stripped. Detection no
+longer needs the runtime log (v0.10.0 never prints `XEX image loaded at LO-HI`) —
+the load address and image size come out of the XEX header itself.
+
+### Cures the pipeline was missing, and cures it should never have made
+
+- **Function pointers the code BUILDS.** A callback materialised as
+  `lis rA,hi; addi rB,rA,lo` and handed to a call appears in no data word, so the
+  data-pointer scan cannot see it and the run-heal found them one
+  launch-and-crash at a time. Forza's heal was curing exactly this family, 15
+  launches for 15 functions; the static scan finds 50 before the first launch.
+- **Nothing may sit on a save/restore helper table.** Gap fill produced overrides
+  on all eight of Forza's helper heads, and a config entry outranks the SDK's
+  helper detection: 472 + 669 call sites lost their intrinsic and the game read
+  NULL through `r20`. The tables are detected from the image and excluded from
+  every scan; stray entries are dropped on load.
+- **`extend_switch_table` is disabled.** v0.10.0 lowers a recovered table as
+  `switch (index) { case i: goto labels[i]; }` — the array is **positional**,
+  duplicates included — where 0.8.2 keyed cases on the computed CTR value.
+  Merging a landing in as a sorted, deduped set silently re-pointed every case
+  after the first change: on Forza it rewrote 10 of 325 tables and dropped 65
+  duplicate slots.
+
+### XAPI fibers
+
+A recompiled `SwitchToFiber` tail-calls `KeSetCurrentStackPointers`, whose `blr`
+was meant to land in the *other* fiber; statically that returns into the old
+fiber's host frames carrying the new fiber's registers. v0.10.0 ships host fibers
+behind `[rexcrt]` hooks but nothing detects the guest routines, so
+`_detect_xapi_fibers` finds all five by signature (KTHREAD `fiber_ptr` access,
+`ERROR_ALREADY_FIBER`/`ERROR_ALREADY_THREAD`, sole callers of
+`MmCreateKernelStack`/`MmDeleteKernelStack`) and writes `<name>_rexcrt.toml`.
+
+### Launcher: image quality
+
+`resolution_scale` (1×–4× internal), `swap_post_effect` (FXAA / FXAA extreme) and
+`anisotropic_override`, all defined by the xenos plugin we already ship, with the
+SDK's real ranges. `present_effect` (CAS/FSR) is deliberately absent: it only
+exists under `REXGLUE_ENABLE_FIDELITYFX`, which our SDK build does not set —
+exposing it would be a dead control.
+
+A title whose fetch constants the plugin calls "invalid" gets that recorded and
+offered in the launcher, **never enabled for you**: binding the descriptor anyway
+trades a magenta area for whatever that memory holds.
+
+### SDK re-pinned — six fixes, each proven on a title
+
+All six are open upstream. `bdz`/`bdnz` to a function entry is a tail call
+(#434); a jump-table landing inside the function being emitted is a `goto`
+(#435); a companion loaded by bare name matches its root-relative `guest_path`
+(#436); an absorbed function no longer leaves dangling `CallTarget`s — Captain
+America emitted `DECLARE_REX_FUNC();` and could not compile (#437);
+`XFileXctdCompressionInformation` answers "not compressed" instead of
+`INVALID_PARAMETER` (#438); a config override on a save/restore helper warns
+(#439).
+
+### Fleet, same SDK, before → after
+
+| title | coverage / functions / holes | verdict |
+|---|---|---|
+| `forza_horizon` | 98.9167% / 79,089 / 0 (unchanged) | crash `0xC0000005` → **converged, 360 s production** |
+| `gears_of_war_judgment` | 99.1966% / 60,140 / 0 (unchanged) | converged → **converged, 360 s production** |
+| `dante_s_inferno` | 98.9891% / 36,546 / 0 (unchanged) | crash `0xC0000005` → **converged, 360 s production** |
+
+Coverage on Gears moved by −188 bytes because the six save/restore helper tables
+stopped being emitted as functions and 21,656 call sites got their intrinsic
+back. Not a regression: fewer bytes of C++, more correct code.
+
+### Known, named, not fixed
+
+- **`ca`** builds and its logo screen renders perfectly, but the title screen
+  background is magenta: the game presents that texture's fetch constant with
+  `type=0`, which the plugin drops. Not the cure set (the proven 218-cure
+  gabarito shows the same), not XCTD, not the three known VMX builder bugs.
+- **`spider_man_dimensions`** does not converge: 9 undeclared labels the landing
+  heal forces and retires in a cycle.
+- **`fifa_street`** needs `XUsbcamGetState` / `XUsbcamSetConfig` in the SDK.
+- **`dante_s_inferno`** converges but the rip carries only `bigfile0/1.viv`; the
+  game asks for `BIGFILE2..12`.
+
+
 ## 2.35.2 — "name the corpse" (2026-09-04)
 
 **The port stops dying in the middle of gameplay.** Ships a rebuilt ReXGlue SDK
